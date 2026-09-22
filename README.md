@@ -94,6 +94,13 @@ somewhere else. See `isupport.rs`.
 (`format.rs`) or be a CTCP request in disguise (`ctcp.rs`) — `/me` is
 `\x01ACTION ...\x01` inside an ordinary `PRIVMSG`.
 
+Registration is covered too. `cap.rs` tracks capability negotiation — including
+multiline `LS`, negated `ACK`s, and the rule that a `NAK` changes nothing
+because the request is refused as a unit. `sasl.rs` handles authentication,
+including the trap where a base64 payload of exactly 400 bytes needs an empty
+continuation or the server waits for it forever, and the rule that `PLAIN` is
+never selected without TLS.
+
 ## Building
 
 Needs Rust 1.75+ and, on Windows, the MSVC build tools.
