@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/rhizome-proto"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Alp"]
+repository = "https://github.com/alplix/rhizome"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
