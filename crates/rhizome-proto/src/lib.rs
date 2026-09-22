@@ -38,18 +38,22 @@
 //! assert!(ctcp::parse(body).is_none());
 //! ```
 
+pub mod cap;
 pub mod casemap;
 pub mod ctcp;
 pub mod format;
 pub mod isupport;
 pub mod message;
+pub mod sasl;
 pub mod split;
 
+pub use cap::{CapEvent, Capabilities};
 pub use casemap::CaseMapping;
 pub use ctcp::Ctcp;
 pub use format::{Color, Span, Style};
 pub use isupport::{ChanModes, ISupport, ModeKind};
 pub use message::{Command, Message, ParseError, Source, Tags};
+pub use sasl::Mechanism;
 pub use split::{payload_budget, split_for_send, split_utf8};
 
 #[cfg(test)]
@@ -126,6 +130,102 @@ mod integration {
 
         // Nothing is lost or duplicated: the chunks rejoin into the original.
         assert_eq!(chunks.join(" "), text);
+    }
+
+    #[test]
+    fn the_full_registration_handshake_produces_the_right_lines() {
+        use sasl::Mechanism;
+
+        let mut caps = Capabilities::new();
+        let mut sent: Vec<String> = Vec::new();
+
+        // We open by asking for the capability list, then send our identity
+        // without ending negotiation.
+        sent.push(Message::new("CAP", ["LS", "302"]).to_wire());
+        sent.push(Message::new("NICK", ["alp"]).to_wire());
+        sent.push(Message::with_body("USER", "alp 0 *", "Alp").to_wire());
+
+        // The server answers across two lines.
+        for line in [
+            ":irc.libera.chat CAP * LS * :sasl=PLAIN,EXTERNAL server-time message-tags",
+            ":irc.libera.chat CAP * LS :multi-prefix echo-message away-notify",
+        ] {
+            let event = cap::parse(&Message::parse(line).unwrap()).unwrap();
+            caps.apply(&event);
+        }
+        assert!(caps.ls_complete());
+
+        // We ask only for what was offered.
+        let request = caps.to_request();
+        assert!(request.contains(&"sasl"));
+        assert!(!request.contains(&"draft/chathistory"));
+        sent.push(Message::with_body("CAP", "REQ", &request.join(" ")).to_wire());
+
+        let ack = ":irc.libera.chat CAP alp ACK :sasl server-time message-tags multi-prefix";
+        caps.apply(&cap::parse(&Message::parse(ack).unwrap()).unwrap());
+        assert!(caps.is_enabled("sasl"));
+        assert!(caps.is_enabled("server-time"));
+
+        // With no client certificate we fall back to PLAIN, which is only
+        // acceptable because this connection is TLS.
+        let candidates = vec![Mechanism::Plain {
+            authcid: "alp".into(),
+            password: "hunter2".into(),
+        }];
+        let mechanism = sasl::select(&caps.sasl_mechanisms(), &candidates, true)
+            .expect("PLAIN is advertised and we are on TLS");
+        sent.push(Message::new("AUTHENTICATE", [mechanism.name()]).to_wire());
+
+        // The server's empty challenge invites the payload.
+        let challenge = Message::parse("AUTHENTICATE +").unwrap();
+        assert_eq!(
+            sasl::decode_payload(challenge.trailing().unwrap()).unwrap(),
+            Vec::<u8>::new()
+        );
+        for payload in mechanism.payloads() {
+            sent.push(Message::new("AUTHENTICATE", [payload]).to_wire());
+        }
+
+        // 903 is RPL_SASLSUCCESS; only then do we end negotiation.
+        let success = Message::parse(":irc.libera.chat 903 alp :SASL authentication successful");
+        assert_eq!(success.unwrap().command.numeric(), Some(903));
+        sent.push(Message::new("CAP", ["END"]).to_wire());
+
+        // The request covers everything offered from both LS lines, in our
+        // own preference order rather than the server's.
+        let expected_req =
+            "CAP REQ :server-time message-tags echo-message sasl multi-prefix away-notify";
+        assert_eq!(
+            sent,
+            vec![
+                "CAP LS 302",
+                "NICK alp",
+                "USER alp 0 * :Alp",
+                expected_req,
+                "AUTHENTICATE PLAIN",
+                "AUTHENTICATE AGFscABodW50ZXIy",
+                "CAP END",
+            ]
+        );
+
+        // Nothing was requested that the server had not offered.
+        assert!(request.iter().all(|c| caps.is_available(c)));
+    }
+
+    #[test]
+    fn a_nak_leaves_us_able_to_finish_registration_unauthenticated() {
+        let mut caps = Capabilities::new();
+        caps.apply(
+            &cap::parse(&Message::parse(":s CAP * LS :sasl=PLAIN server-time").unwrap()).unwrap(),
+        );
+        caps.apply(
+            &cap::parse(&Message::parse(":s CAP alp NAK :sasl server-time").unwrap()).unwrap(),
+        );
+
+        // Nothing got enabled, so we must not start an AUTHENTICATE exchange
+        // that the server will never answer.
+        assert!(!caps.is_enabled("sasl"));
+        assert!(!caps.is_enabled("server-time"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ yet.
 
 | Crate | State |
 |---|---|
-| `rhizome-proto` | ✅ Complete — 72 tests, zero clippy warnings |
+| `rhizome-proto` | ✅ Complete — 100 tests, zero clippy warnings |
 | `rhizome-client` | ⬜ Not started — connection, TLS, SASL, session state |
 | `rhizome-store` | ⬜ Not started — SQLite log with FTS5 search |
 | `rhizome-app` | ⬜ Not started — Tauri v2 shell |
@@ -47,7 +47,8 @@ the start, not bolted on.
 ```
 crates/
   rhizome-proto/   line protocol: framing, IRCv3 tags, ISUPPORT, casemapping,
-                   formatting codes, CTCP. No I/O, no dependencies.
+                   formatting codes, CTCP, capability negotiation, SASL.
+                   No I/O, no dependencies.
   rhizome-client/  connection, TLS, SASL, session state, reconnect  (planned)
   rhizome-store/   SQLite message log and FTS5 search               (planned)
   rhizome-app/     Tauri commands and event stream                  (planned)
@@ -103,9 +104,10 @@ cargo test
 
 ## Next steps
 
-1. `rhizome-client`: TLS connection, capability negotiation, SASL PLAIN and
-   EXTERNAL, session state (channels, users, modes), reconnect with backoff and
-   a token-bucket send queue at roughly 2 messages/second.
+1. `rhizome-client`: TLS connection and the async driver around the
+   handshake `cap`/`sasl` already model, plus session state (channels, users,
+   modes), reconnect with backoff, and a token-bucket send queue at roughly
+   2 messages/second.
 2. `rhizome-store`: SQLite schema and FTS5 index.
 3. `rhizome-app` + `ui/`: the Tauri shell and the first usable window.
 4. Android target once the desktop MVP works — the shared core is already
