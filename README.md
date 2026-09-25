@@ -8,18 +8,19 @@ shape, and the opposite of the centralised chat platforms that replaced it.
 
 ## Status
 
-Early, but it connects: the engine registers on a real network over TLS,
-tracks channels and members, and reports everything as a stream of events. There
-is no graphical interface yet; a small terminal client (see below) exercises the
-engine.
+Early, but it runs: a desktop window that connects to IRC networks over TLS,
+follows channels and members, keeps a searchable log of everything it sees, and
+survives a restart. It has been exercised end to end in its real window (see
+*Testing*), but it has not yet been used day to day, and it is not packaged: you
+run it from source.
 
 | Crate | State |
 |---|---|
 | `rhizome-proto` | ✅ Complete — 107 tests |
 | `rhizome-client` | ✅ Engine complete — 89 tests, verified live against Libera.Chat |
 | `rhizome-store` | ✅ Complete — 73 tests; message log and full-text search on SQLite FTS5 |
-| `rhizome-app` | ⬜ Not started — Tauri v2 shell |
-| `ui/` | ⬜ Not started — web frontend |
+| `rhizome-app` | ✅ Working — Tauri v2 window joining engine and store; 40 tests |
+| `ui/` | ✅ Working — plain JavaScript, no build step; 74 tests |
 
 ## Why build this
 
@@ -56,8 +57,10 @@ crates/
                    tokio driver wraps it.
   rhizome-store/   SQLite message log and FTS5 search. Independent of
                    the engine: takes plain values, knows no sockets.
-  rhizome-app/     Tauri commands and event stream                  (planned)
-ui/                web frontend                                     (planned)
+  rhizome-app/     Tauri window. `core` (networks, log, event
+                   translation) is independent of Tauri and tested
+                   without a window; lib.rs is thin glue.
+ui/                the interface: ES modules, no bundler, no npm.
 ```
 
 Two deliberate choices:
@@ -148,7 +151,43 @@ What is logged today is chat text (messages, notices and `/me` actions).
 Joins, parts, quits and topic changes are reported by the engine but not yet
 stored, so a scrollback view will not show them.
 
+## The window
+
+- **Three panes:** networks and conversations with unread and mention badges;
+  the messages with day dividers and an "unread" marker; the channel's members.
+  On a narrow screen the side panes become drawers.
+- **Search (Ctrl+K)** over everything logged, across networks or in one, by best
+  match or newest. Opening a result shows it in its conversation, with a way back
+  to the live end.
+- **Typing:** Tab completes nicks, ↑ recalls what you sent, `/help` lists the
+  commands. A typo such as `/joinn` is reported, never posted as chat.
+- **Pasting** more than three lines asks first, and each line then goes out as its
+  own message under the rate limit.
+- **IRC colours stay readable:** colours chosen for a white or black page are
+  nudged until they have enough contrast on the current theme. Light and dark
+  follow the system.
+- **Saved networks** keep everything except the password, which is asked for when
+  you connect and is wiped from the field as soon as it is read.
+
 ## Safety properties
+
+Everything a stranger on an IRC network sends ends up in this window, so it is
+treated as hostile input.
+
+- **Message text is never markup.** The backend turns formatting codes into
+  styled spans and the interface builds them with `textContent`; there is no
+  `innerHTML` for message content anywhere.
+- **Links are `http(s)` only,** opened in the system browser by the backend, which
+  refuses `javascript:`, `file:`, `data:` and app-registered schemes such as
+  `ms-msdt:`.
+- **The window cannot leave the app.** Navigation to anything but the app's own
+  origin is refused, so a link that slipped past the interface still cannot
+  replace Rhizome with a web page.
+- **Scripts and styles come from the app only** (a content security policy, with
+  no inline scripts or `style` attributes), and the window's capability set is
+  `core:default`: no filesystem, shell or extra plugin access.
+- **A profile is validated by the backend,** whatever the interface allowed
+  through, and a corrupt profile file is reported rather than overwritten.
 
 - **No command injection.** Every outgoing line passes
   `Message::validate_for_send`, which refuses CR, LF and NUL in any parameter.
@@ -168,15 +207,39 @@ QUIT` becomes chat text, never a second command; this is
 
 ## Building
 
-Needs Rust 1.75+ and, on Windows, the MSVC build tools.
+On Windows you need the MSVC build tools and WebView2 (already part of
+Windows 11). Minimum Rust versions, taken from what each crate's dependencies
+declare: `rhizome-proto` 1.75, `rhizome-client` and `rhizome-store` 1.85,
+`rhizome-app` 1.88. Only the current stable toolchain (1.98) has actually been
+built with.
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
 ## Trying it
 
-A minimal terminal client is included:
+Run the application:
+
+```bash
+cargo run -p rhizome-app
+```
+
+Add a network with the **+** button, connect, and join a channel with
+`/join #channel`. Your messages and settings are kept in the application's data
+directory (`%APPDATA%\org.rhizome.irc` on Windows).
+
+To work on the interface without the application, serve `ui/` with any static
+server and open it in a browser. With no Tauri around it runs against a demo
+backend (`ui/mock.js`) with a fake network, history and a bot, including
+deliberately hostile messages, so the interface can be looked at and tested
+without connecting anywhere:
+
+```bash
+python -m http.server 8770 --directory ui
+```
+
+A minimal terminal client is also included:
 
 ```bash
 cargo run -p rhizome-client --example connect -- --nick my_nick --join "#rhizome"
@@ -188,21 +251,36 @@ argument, since those end up in shell history. Type text to talk in the current
 channel; `/join`, `/part`, `/me`, `/msg`, `/nick`, `/buf`, `/raw` and `/quit`
 are supported.
 
-That client does not write to the log yet; the two are joined in the desktop
-app. The store is exercised end to end by
-`crates/rhizome-store/tests/pipeline.rs`, which runs a server transcript through
-the real session into the store and back out through search.
+That client does not write to the log; the desktop app does.
+
+## Testing
+
+| What | Where | Run |
+|---|---|---|
+| Protocol, engine, store, app core | Rust unit and integration tests | `cargo test --workspace` |
+| Interface logic (commands, links, state) | `ui/tests` | `node --test "ui/tests/*.test.mjs"` |
+| **The real window** | `crates/rhizome-app/e2e/webview_e2e.py` | `python crates/rhizome-app/e2e/webview_e2e.py` (Windows, after `cargo build -p rhizome-app`) |
+
+The last one launches the actual application, drives its WebView2 page over the
+DevTools Protocol and connects it to a scripted IRC server on localhost. It is
+the only test that exercises the Tauri glue: the IPC commands, event delivery,
+the capability set, the content security policy, the navigation guard and
+persistence across a restart. It refuses to run if the application's data
+directory already exists, so it cannot touch real data.
 
 ## Next steps
 
-1. `rhizome-app` + `ui/`: the Tauri shell and the first usable window, which
-   joins the engine to the store.
-2. Log joins, parts, quits and topics, and track read markers for unread counts.
-3. Client certificates for SASL `EXTERNAL`. The protocol layer already models
+1. Use it for real, and fix what that shows. Nothing here has had a week of daily use.
+2. Log joins, parts, quits and topics, and persist read markers so unread counts
+   survive a restart.
+3. Desktop notifications for mentions; packaging (an installer) and a release
+   build; the Android target.
+4. Store the password in the operating system's credential store as an option,
+   instead of asking each time.
+5. Client certificates for SASL `EXTERNAL`. The protocol layer already models
    it; the driver does not yet load a certificate.
-4. An opt-in way to accept a self-signed server certificate.
-5. Android target once the desktop MVP works — the shared core is already
-   free of platform code, so this is a build-system task, not a rewrite.
+6. An opt-in way to accept a self-signed server certificate.
+7. Translating the interface (it is English only), and right-to-left text.
 
 ## Licence
 
@@ -213,7 +291,9 @@ GPL-3.0-or-later, for every crate. See `LICENSE`.
 - **Send rate.** The default is a burst of 5 then 1 message per second,
   deliberately conservative and configurable per connection. It has not been
   tuned against any particular network's actual flood limit.
-- **Android NDK.** Not installed; deferred until the desktop MVP runs.
+- **Android.** The desktop app now runs, so this is next when wanted. Tauri v2 targets
+  Android, but the app crate is not yet set up as a mobile library and the NDK is
+  not installed. The layout already collapses to drawers on a narrow screen.
 - **Bouncer.** Optional. The client works standalone with its own local log;
   a bouncer such as soju only matters for staying connected while the client
   is closed.

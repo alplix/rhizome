@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window may listen for the events the backend emits and call the application's own commands. It has no filesystem, shell or network access of its own.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

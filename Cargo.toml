@@ -1,11 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/rhizome-proto", "crates/rhizome-client", "crates/rhizome-store"]
+members = ["crates/rhizome-proto", "crates/rhizome-client", "crates/rhizome-store", "crates/rhizome-app"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
 authors = ["Alp"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/alplix/rhizome"

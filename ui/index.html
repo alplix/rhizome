@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <!-- The same policy the application enforces, so opening this page in a browser
+       exposes anything that would be blocked there. Scripts and styles come from
+       this origin only; there are no inline styles or handlers. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'">
+  <title>Rhizome</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar" aria-label="Networks and conversations">
+      <header class="pane-head">
+        <span class="brand">Rhizome</span>
+        <span class="spacer"></span>
+        <button id="btn-search" class="icon-btn" type="button" title="Search the log (Ctrl+K)" aria-label="Search the log">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/></svg>
+        </button>
+        <button id="btn-networks" class="icon-btn" type="button" title="Networks" aria-label="Manage networks">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </header>
+      <div id="buffer-list"></div>
+    </nav>
+
+    <main id="main">
+      <header id="topbar">
+        <button id="toggle-sidebar" class="icon-btn narrow-only" type="button" aria-label="Show conversations">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div id="title">
+          <h1 id="title-name">Rhizome</h1>
+          <p id="title-topic"></p>
+        </div>
+        <span id="status" role="status"></span>
+        <button id="toggle-members" class="icon-btn" type="button" aria-label="Show members" aria-pressed="true" title="Members">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 19c.6-3.2 3-5 6-5s5.4 1.800 6 5"/><path d="M16.500 5.200a3 3 0 010 5.600M18.500 14.200c1.600.8 2.600 2.500 2.900 4.800"/></svg>
+        </button>
+      </header>
+
+      <div id="context-banner" hidden>
+        <span>Showing a search result.</span>
+        <button id="btn-live" type="button">Back to now</button>
+      </div>
+
+      <div id="messages" role="log" aria-live="polite" aria-relevant="additions" aria-label="Messages" tabindex="0"></div>
+      <button id="new-pill" type="button" hidden></button>
+
+      <form id="composer" autocomplete="off">
+        <textarea id="input" rows="1" spellcheck="false" aria-label="Message" placeholder="Message"></textarea>
+        <button id="btn-send" type="submit">Send</button>
+      </form>
+    </main>
+
+    <aside id="members-pane" aria-label="Members">
+      <h2 id="members-title">Members</h2>
+      <ul id="members"></ul>
+    </aside>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- Search the log -->
+  <dialog id="search-dialog" aria-label="Search the log">
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/></svg>
+      <input id="search-input" type="search" spellcheck="false" autocomplete="off"
+             placeholder="Search everything you have seen…" aria-label="Search query"
+             aria-controls="search-results">
+    </div>
+    <div class="search-options">
+      <label>Where
+        <select id="search-scope">
+          <option value="all">All networks</option>
+          <option value="this">This network</option>
+        </select>
+      </label>
+      <label>Order
+        <select id="search-order">
+          <option value="relevance">Best match</option>
+          <option value="newest">Newest first</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <span id="search-count" role="status"></span>
+    </div>
+    <ul id="search-results" role="listbox" aria-label="Results"></ul>
+    <p class="search-help">
+      <code>from:bob</code> <code>in:#kernel</code> <code>"exact phrase"</code> <code>kmall*</code>
+      &nbsp;·&nbsp; ↑ ↓ to choose, Enter to open, Esc to close
+    </p>
+  </dialog>
+
+  <!-- Saved networks -->
+  <dialog id="networks-dialog" aria-label="Networks">
+    <form method="dialog" class="dialog-head">
+      <h2>Networks</h2>
+      <button class="icon-btn" value="close" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </form>
+    <ul id="profile-list"></ul>
+    <div class="dialog-actions">
+      <button id="btn-add-network" type="button" class="primary">Add a network</button>
+    </div>
+  </dialog>
+
+  <!-- Add or edit a network -->
+  <dialog id="profile-dialog" aria-label="Network settings">
+    <form id="profile-form" method="dialog" autocomplete="off">
+      <h2 id="profile-title">Add a network</h2>
+      <div class="grid">
+        <label>Name <input id="p-name" required placeholder="Libera.Chat"></label>
+        <label>Server <input id="p-host" required placeholder="irc.libera.chat" spellcheck="false"></label>
+        <label>Port <input id="p-port" type="number" min="1" max="65535" value="6697"></label>
+        <label class="check"><input id="p-tls" type="checkbox" checked> Use TLS (recommended)</label>
+        <label>Nick <input id="p-nick" required spellcheck="false"></label>
+        <label>Username <input id="p-username" spellcheck="false"></label>
+        <label>Real name <input id="p-realname" value="Rhizome"></label>
+        <label>Channels <input id="p-channels" placeholder="#rhizome, #kernel" spellcheck="false"></label>
+        <label>Account (SASL) <input id="p-account" placeholder="optional; your NickServ account" spellcheck="false"></label>
+      </div>
+      <p class="fine">Your password is asked for when you connect and is never saved.</p>
+      <output id="profile-error" class="error" hidden></output>
+      <div class="dialog-actions">
+        <button id="btn-profile-cancel" type="button">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Password prompt -->
+  <dialog id="password-dialog" aria-label="Password">
+    <form id="password-form" method="dialog" autocomplete="off">
+      <h2 id="password-title">Password</h2>
+      <label>Password for <strong id="password-account"></strong>
+        <input id="password-input" type="password" autocomplete="off" required>
+      </label>
+      <p class="fine">Used to log in now. It is not stored.</p>
+      <div class="dialog-actions">
+        <button id="btn-password-cancel" type="button">Cancel</button>
+        <button type="submit" class="primary">Connect</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirm a multi-line paste -->
+  <dialog id="paste-dialog" aria-label="Send several lines?">
+    <form id="paste-form" method="dialog">
+      <h2 id="paste-title">Send several lines?</h2>
+      <p id="paste-lead"></p>
+      <pre id="paste-preview"></pre>
+      <p class="fine">Each line goes out as its own message, spaced to stay under the server's flood limit.</p>
+      <div class="dialog-actions">
+        <button id="btn-paste-cancel" type="button">Cancel</button>
+        <button type="submit" class="primary" id="btn-paste-send">Send</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

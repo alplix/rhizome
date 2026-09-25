@@ -1,0 +1,35 @@
+[package]
+name = "rhizome-app"
+description = "The Rhizome desktop application: engine and store behind a Tauri window"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+default-run = "rhizome"
+
+[lib]
+name = "rhizome_app"
+
+[[bin]]
+name = "rhizome"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rhizome-proto = { path = "../rhizome-proto" }
+rhizome-client = { path = "../rhizome-client" }
+rhizome-store = { path = "../rhizome-store" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }

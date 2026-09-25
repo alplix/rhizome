@@ -3,7 +3,7 @@ name = "rhizome-client"
 description = "IRC client engine: connection, TLS, registration, session state and reconnect"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.85"
 license.workspace = true
 
 [dependencies]

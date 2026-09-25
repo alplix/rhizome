@@ -1079,11 +1079,11 @@ fn mentions(text: &str, nick: &str, map: CaseMapping) -> bool {
         let before_ok = hay[..start]
             .chars()
             .next_back()
-            .map_or(true, |c| !continues_a_nick(c));
+            .is_none_or(|c| !continues_a_nick(c));
         let after_ok = hay[end..]
             .chars()
             .next()
-            .map_or(true, |c| !continues_a_nick(c));
+            .is_none_or(|c| !continues_a_nick(c));
         if before_ok && after_ok {
             return true;
         }
