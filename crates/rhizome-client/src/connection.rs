@@ -112,7 +112,9 @@ impl Handle {
     }
 
     pub fn join(&self, channels: &[&str]) -> Result<(), Closed> {
-        self.send(Command::Join(channels.iter().map(|c| (*c).to_owned()).collect()))
+        self.send(Command::Join(
+            channels.iter().map(|c| (*c).to_owned()).collect(),
+        ))
     }
 
     pub fn part(&self, channel: &str, reason: Option<&str>) -> Result<(), Closed> {
@@ -375,7 +377,11 @@ async fn run_once(
 ) -> Outcome {
     let mut config = config.clone();
     for channel in joined {
-        if !config.autojoin.iter().any(|c| c.eq_ignore_ascii_case(channel)) {
+        if !config
+            .autojoin
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(channel))
+        {
             config.autojoin.push(channel.clone());
         }
     }

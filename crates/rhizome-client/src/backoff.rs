@@ -79,7 +79,16 @@ mod tests {
         let delays: Vec<_> = (0..8).map(|i| b.delay_for(i)).collect();
         assert_eq!(
             delays,
-            vec![secs(2), secs(4), secs(8), secs(16), secs(32), secs(60), secs(60), secs(60)]
+            vec![
+                secs(2),
+                secs(4),
+                secs(8),
+                secs(16),
+                secs(32),
+                secs(60),
+                secs(60),
+                secs(60)
+            ]
         );
     }
 

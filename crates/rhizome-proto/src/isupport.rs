@@ -153,9 +153,7 @@ impl ISupport {
                 self.statusmsg = value.unwrap_or_default().to_owned();
             }
             "PREFIX" => {
-                self.prefixes = value
-                    .and_then(parse_prefix)
-                    .unwrap_or(defaults.prefixes);
+                self.prefixes = value.and_then(parse_prefix).unwrap_or(defaults.prefixes);
             }
             _ => {}
         }
@@ -281,9 +279,7 @@ mod tests {
     use super::*;
 
     fn isupport(tokens: &str) -> ISupport {
-        let line = format!(
-            ":irc.libera.chat 005 alp {tokens} :are supported by this server"
-        );
+        let line = format!(":irc.libera.chat 005 alp {tokens} :are supported by this server");
         let mut s = ISupport::default();
         s.ingest(&Message::parse(&line).unwrap());
         s
@@ -378,8 +374,7 @@ mod tests {
     fn later_005_replies_accumulate() {
         let mut s = ISupport::default();
         for tokens in ["NETWORK=Libera.Chat", "NICKLEN=16 CASEMAPPING=ascii"] {
-            let line =
-                format!(":irc.libera.chat 005 alp {tokens} :are supported by this server");
+            let line = format!(":irc.libera.chat 005 alp {tokens} :are supported by this server");
             s.ingest(&Message::parse(&line).unwrap());
         }
         assert_eq!(s.network(), Some("Libera.Chat"));

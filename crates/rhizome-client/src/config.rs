@@ -157,14 +157,19 @@ mod tests {
         let mut c = Config::new("h", "alp").sasl_plain("alp", "sasl-secret-1");
         c.server_password = Some(Secret::new("server-secret-2"));
         let shown = format!("{c:?}");
-        assert!(!shown.contains("sasl-secret-1"), "SASL password leaked: {shown}");
+        assert!(
+            !shown.contains("sasl-secret-1"),
+            "SASL password leaked: {shown}"
+        );
         assert!(!shown.contains("server-secret-2"), "PASS leaked: {shown}");
         assert!(shown.contains("alp"));
     }
 
     #[test]
     fn autojoin_accumulates() {
-        let c = Config::new("h", "n").autojoin(["#a", "#b"]).autojoin(["#c"]);
+        let c = Config::new("h", "n")
+            .autojoin(["#a", "#b"])
+            .autojoin(["#c"]);
         assert_eq!(c.autojoin, vec!["#a", "#b", "#c"]);
     }
 }

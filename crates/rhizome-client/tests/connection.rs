@@ -128,9 +128,11 @@ async fn registers_joins_and_exchanges_messages() {
         peer.expect("JOIN #rhizome").await;
 
         let t = "@time=2026-09-25T10:00:00.000Z";
-        peer.send(&format!("{t} :alp!~alp@host JOIN #rhizome")).await;
+        peer.send(&format!("{t} :alp!~alp@host JOIN #rhizome"))
+            .await;
         peer.send(":srv 353 alp = #rhizome :@alp +bob carol").await;
-        peer.send(":srv 366 alp #rhizome :End of /NAMES list.").await;
+        peer.send(":srv 366 alp #rhizome :End of /NAMES list.")
+            .await;
         peer.send(&format!("{t} :bob!b@h PRIVMSG #rhizome :merhaba alp"))
             .await;
 
@@ -367,8 +369,10 @@ async fn ping_is_answered_even_while_a_paste_is_queued_behind_the_rate_limit() {
     let paste = (0..20)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     client.handle.message("#c", &paste).unwrap();
 
     let before_pong = timeout(WAIT, server).await.unwrap().unwrap();

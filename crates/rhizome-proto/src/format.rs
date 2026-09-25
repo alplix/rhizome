@@ -226,7 +226,10 @@ pub fn has_formatting(text: &str) -> bool {
 }
 
 fn is_format_byte(b: u8) -> bool {
-    matches!(b, 0x02 | 0x03 | 0x04 | 0x0F | 0x11 | 0x16 | 0x1D | 0x1E | 0x1F)
+    matches!(
+        b,
+        0x02 | 0x03 | 0x04 | 0x0F | 0x11 | 0x16 | 0x1D | 0x1E | 0x1F
+    )
 }
 
 /// Reads up to `max` ASCII digits starting at `i`, returning the value and the
@@ -424,7 +427,10 @@ mod tests {
         let spans = parse("\u{03}04Merhaba şğüöç\u{0F} dünya");
         assert_eq!(spans[0].text, "Merhaba şğüöç");
         assert_eq!(spans[1].text, " dünya");
-        assert_eq!(strip("\u{03}04Merhaba şğüöç\u{0F} dünya"), "Merhaba şğüöç dünya");
+        assert_eq!(
+            strip("\u{03}04Merhaba şğüöç\u{0F} dünya"),
+            "Merhaba şğüöç dünya"
+        );
     }
 
     #[test]

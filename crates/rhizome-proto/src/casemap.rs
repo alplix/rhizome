@@ -142,7 +142,10 @@ mod tests {
     #[test]
     fn unknown_casemapping_value_falls_back_to_rfc1459() {
         assert_eq!(CaseMapping::parse("ascii"), CaseMapping::Ascii);
-        assert_eq!(CaseMapping::parse("RFC1459-STRICT"), CaseMapping::Rfc1459Strict);
+        assert_eq!(
+            CaseMapping::parse("RFC1459-STRICT"),
+            CaseMapping::Rfc1459Strict
+        );
         assert_eq!(CaseMapping::parse("something-new"), CaseMapping::Rfc1459);
         assert_eq!(CaseMapping::default(), CaseMapping::Rfc1459);
     }

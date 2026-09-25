@@ -143,9 +143,9 @@ pub fn select<'a>(
     candidates: &'a [Mechanism],
     tls: bool,
 ) -> Option<&'a Mechanism> {
-    candidates.iter().find(|m| {
-        advertised.iter().any(|a| a == m.name()) && (tls || !m.requires_tls())
-    })
+    candidates
+        .iter()
+        .find(|m| advertised.iter().any(|a| a == m.name()) && (tls || !m.requires_tls()))
 }
 
 /// A minimal base64 codec.
@@ -154,8 +154,7 @@ pub fn select<'a>(
 /// them, which is what lets it be shared unchanged by the desktop app, an
 /// Android build and any headless tool.
 mod base64 {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub(super) fn encode(input: &[u8]) -> String {
         let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

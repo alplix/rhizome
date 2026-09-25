@@ -25,7 +25,11 @@ pub fn parse_server_time(s: &str) -> Option<i64> {
     let num = |range: std::ops::Range<usize>| -> Option<i64> {
         let digits = &b[range];
         if digits.iter().all(u8::is_ascii_digit) {
-            Some(digits.iter().fold(0i64, |n, d| n * 10 + i64::from(d - b'0')))
+            Some(
+                digits
+                    .iter()
+                    .fold(0i64, |n, d| n * 10 + i64::from(d - b'0')),
+            )
         } else {
             None
         }
@@ -164,11 +168,23 @@ mod tests {
     #[test]
     fn fractional_seconds_of_any_length_are_read_as_milliseconds() {
         let base = parse_server_time("2026-09-25T10:00:00Z").unwrap();
-        assert_eq!(parse_server_time("2026-09-25T10:00:00.5Z"), Some(base + 500));
-        assert_eq!(parse_server_time("2026-09-25T10:00:00.05Z"), Some(base + 50));
-        assert_eq!(parse_server_time("2026-09-25T10:00:00.123Z"), Some(base + 123));
+        assert_eq!(
+            parse_server_time("2026-09-25T10:00:00.5Z"),
+            Some(base + 500)
+        );
+        assert_eq!(
+            parse_server_time("2026-09-25T10:00:00.05Z"),
+            Some(base + 50)
+        );
+        assert_eq!(
+            parse_server_time("2026-09-25T10:00:00.123Z"),
+            Some(base + 123)
+        );
         // Extra precision is truncated, not rounded up into the next millisecond.
-        assert_eq!(parse_server_time("2026-09-25T10:00:00.123999Z"), Some(base + 123));
+        assert_eq!(
+            parse_server_time("2026-09-25T10:00:00.123999Z"),
+            Some(base + 123)
+        );
     }
 
     #[test]
@@ -181,8 +197,14 @@ mod tests {
     fn leap_days_are_validated() {
         assert!(parse_server_time("2024-02-29T00:00:00Z").is_some());
         assert!(parse_server_time("2023-02-29T00:00:00Z").is_none());
-        assert!(parse_server_time("1900-02-29T00:00:00Z").is_none(), "1900 was not a leap year");
-        assert!(parse_server_time("2000-02-29T00:00:00Z").is_some(), "2000 was");
+        assert!(
+            parse_server_time("1900-02-29T00:00:00Z").is_none(),
+            "1900 was not a leap year"
+        );
+        assert!(
+            parse_server_time("2000-02-29T00:00:00Z").is_some(),
+            "2000 was"
+        );
     }
 
     #[test]

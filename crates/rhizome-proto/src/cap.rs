@@ -63,10 +63,7 @@ pub enum CapEvent {
         more: bool,
     },
     /// The server listed the capabilities currently enabled.
-    List {
-        caps: Vec<String>,
-        more: bool,
-    },
+    List { caps: Vec<String>, more: bool },
     /// The server granted the requested capabilities.
     Ack(Vec<String>),
     /// The server refused them. The whole request is refused as a unit.
@@ -386,7 +383,10 @@ mod tests {
 
         caps.apply(&event(":s CAP alp LIST :away-notify"));
         assert!(caps.is_enabled("away-notify"));
-        assert!(!caps.is_enabled("server-time"), "a complete LIST is authoritative");
+        assert!(
+            !caps.is_enabled("server-time"),
+            "a complete LIST is authoritative"
+        );
     }
 
     #[test]

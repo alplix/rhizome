@@ -78,49 +78,86 @@ fn a_conversation_flows_from_the_wire_into_search() {
 
     let mut store = Store::open_in_memory().unwrap();
     for m in messages.iter().chain(own.iter()) {
-        store.log_message(&to_new_message(NET, m, 1_790_330_500_000)).unwrap();
+        store
+            .log_message(&to_new_message(NET, m, 1_790_330_500_000))
+            .unwrap();
     }
 
     // Two conversations: the channel, and the private one keyed by the sender.
-    let names: Vec<String> = store.buffers(NET).unwrap().into_iter().map(|b| b.name).collect();
+    let names: Vec<String> = store
+        .buffers(NET)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"#rhizome".to_owned()) && names.contains(&"dave".to_owned()));
 
     // "Who mentioned the backtrace": a plain word, across channel and query,
     // including the action and the one wrapped in a bold code.
-    let found = store.search("backtrace", &SearchOptions::default()).unwrap();
+    let found = store
+        .search("backtrace", &SearchOptions::default())
+        .unwrap();
     assert_eq!(found.len(), 3);
     let buffers: Vec<&str> = found.iter().map(|h| h.message.buffer.as_str()).collect();
     assert!(buffers.contains(&"#rhizome") && buffers.contains(&"dave"));
 
     // The action is stored as an action, with its text unwrapped from CTCP.
-    let action = found.iter().find(|h| h.message.kind == Kind::Action).unwrap();
+    let action = found
+        .iter()
+        .find(|h| h.message.kind == Kind::Action)
+        .unwrap();
     assert_eq!(action.message.text, "facepalms at the backtrace");
     assert_eq!(action.message.sender, "carol");
 
     // The highlight the session computed is what the log remembers.
-    let mention = found.iter().find(|h| h.message.msgid.as_deref() == Some("m3")).unwrap();
+    let mention = found
+        .iter()
+        .find(|h| h.message.msgid.as_deref() == Some("m3"))
+        .unwrap();
     assert!(mention.message.highlight);
-    assert!(mention.message.text.contains('\u{2}'), "raw text keeps its bold codes");
+    assert!(
+        mention.message.text.contains('\u{2}'),
+        "raw text keeps its bold codes"
+    );
 
     // Narrowing with the filters a developer would actually type.
-    let by_carol = store.search("backtrace from:carol", &SearchOptions::default()).unwrap();
+    let by_carol = store
+        .search("backtrace from:carol", &SearchOptions::default())
+        .unwrap();
     assert_eq!(by_carol.len(), 1);
-    let private = store.search("backtrace in:dave", &SearchOptions::default()).unwrap();
+    let private = store
+        .search("backtrace in:dave", &SearchOptions::default())
+        .unwrap();
     assert_eq!(private[0].message.sender, "dave");
 
     // Turkish, typed without Turkish characters.
-    let turkish = store.search("dunya hatayi", &SearchOptions::default()).unwrap();
-    assert!(turkish.is_empty(), "'hatayı' has a dotless ı, which is not folded to i");
-    let turkish = store.search("dunya turkce", &SearchOptions::default()).unwrap();
+    let turkish = store
+        .search("dunya hatayi", &SearchOptions::default())
+        .unwrap();
+    assert!(
+        turkish.is_empty(),
+        "'hatayı' has a dotless ı, which is not folded to i"
+    );
+    let turkish = store
+        .search("dunya turkce", &SearchOptions::default())
+        .unwrap();
     assert_eq!(turkish.len(), 1);
     assert_eq!(turkish[0].message.sender, "carol");
 
     // An identifier stays whole.
-    assert_eq!(store.search("kmalloc_array", &SearchOptions::default()).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .search("kmalloc_array", &SearchOptions::default())
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Our own message, stamped with its arrival time since it has no server time.
-    let ours = store.search("attaching", &SearchOptions::default()).unwrap();
+    let ours = store
+        .search("attaching", &SearchOptions::default())
+        .unwrap();
     assert!(ours[0].message.own);
     assert_eq!(ours[0].message.time_ms, 1_790_330_500_000);
 

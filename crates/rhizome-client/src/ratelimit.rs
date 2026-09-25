@@ -89,7 +89,10 @@ mod tests {
         assert!(b.try_take(t0));
         assert!(b.try_take(t0));
         assert!(b.try_take(t0));
-        assert!(!b.try_take(t0), "the fourth message in the same instant waits");
+        assert!(
+            !b.try_take(t0),
+            "the fourth message in the same instant waits"
+        );
     }
 
     #[test]
@@ -124,7 +127,10 @@ mod tests {
         let wait = b.wait_time(t0);
         assert!(wait > Duration::from_millis(990) && wait <= Duration::from_secs(1));
         // After that long, the wait is over.
-        assert_eq!(b.wait_time(t0 + Duration::from_millis(1001)), Duration::ZERO);
+        assert_eq!(
+            b.wait_time(t0 + Duration::from_millis(1001)),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -139,11 +145,25 @@ mod tests {
 
     #[test]
     fn connection_essentials_bypass_the_limit_but_chat_does_not() {
-        for cmd in ["PONG", "PING", "CAP", "AUTHENTICATE", "PASS", "NICK", "USER"] {
-            assert!(is_exempt(&Message::new(cmd, ["x"])), "{cmd} should be exempt");
+        for cmd in [
+            "PONG",
+            "PING",
+            "CAP",
+            "AUTHENTICATE",
+            "PASS",
+            "NICK",
+            "USER",
+        ] {
+            assert!(
+                is_exempt(&Message::new(cmd, ["x"])),
+                "{cmd} should be exempt"
+            );
         }
         for cmd in ["PRIVMSG", "NOTICE", "JOIN", "PART", "MODE", "QUIT"] {
-            assert!(!is_exempt(&Message::new(cmd, ["x"])), "{cmd} should be limited");
+            assert!(
+                !is_exempt(&Message::new(cmd, ["x"])),
+                "{cmd} should be limited"
+            );
         }
     }
 }

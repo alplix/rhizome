@@ -251,7 +251,14 @@ mod integration {
                     support.chanmodes().kind(mode),
                     Some(ModeKind::List | ModeKind::Setting | ModeKind::SettingOnSet)
                 );
-            applied.push((mode, if takes_arg { args.next().cloned() } else { None }));
+            applied.push((
+                mode,
+                if takes_arg {
+                    args.next().cloned()
+                } else {
+                    None
+                },
+            ));
         }
 
         assert_eq!(

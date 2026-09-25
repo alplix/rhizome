@@ -234,7 +234,11 @@ mod tests {
         // A quote opens a phrase, so this is `it` then the phrase `s `.
         let q = parse("it\"s");
         for expr in q.fts.iter() {
-            assert_eq!(expr.matches('"').count() % 2, 0, "unbalanced quotes: {expr}");
+            assert_eq!(
+                expr.matches('"').count() % 2,
+                0,
+                "unbalanced quotes: {expr}"
+            );
         }
         assert_eq!(quote("a\"b"), "\"a\"\"b\"");
     }
@@ -255,7 +259,10 @@ mod tests {
                     depth = 1 - depth;
                 }
             } else if depth == 0 {
-                assert!(c == ' ' || c == '*', "syntax leaked outside a literal: {expr}");
+                assert!(
+                    c == ' ' || c == '*',
+                    "syntax leaked outside a literal: {expr}"
+                );
             }
         }
         assert_eq!(depth, 0, "unterminated literal in {expr}");
