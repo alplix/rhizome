@@ -38,6 +38,41 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Why a message was refused by [`Message::validate_for_send`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The command is empty or contains a space or control character.
+    BadCommand,
+    /// A tag key is empty or contains a space, `;`, `=` or control character.
+    BadTag,
+    /// A parameter contains CR, LF or NUL. Sending it would let the text
+    /// after the line break be read as a second command.
+    ForbiddenCharacter { index: usize },
+    /// A parameter other than the last is empty, contains a space, or starts
+    /// with `:`, so it could not be told apart from its neighbours.
+    MalformedParameter { index: usize },
+    /// The line exceeds the protocol size limit.
+    TooLong { bytes: usize },
+}
+
+impl fmt::Display for SendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendError::BadCommand => f.write_str("invalid command"),
+            SendError::BadTag => f.write_str("invalid tag key"),
+            SendError::ForbiddenCharacter { index } => {
+                write!(f, "parameter {index} contains a line break or NUL")
+            }
+            SendError::MalformedParameter { index } => {
+                write!(f, "parameter {index} cannot be sent in non-final position")
+            }
+            SendError::TooLong { bytes } => write!(f, "line is {bytes} bytes, over the limit"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
+
 /// Where a message came from, parsed from the `:prefix` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -344,13 +379,78 @@ impl Message {
     /// bare, and a body that later grows a leading `:` or becomes empty would
     /// change meaning.
     pub fn with_body(command: &str, target: &str, body: &str) -> Message {
+        Message::with_trailing(command, [target], body)
+    }
+
+    /// Builds a message with any number of leading parameters and a final
+    /// parameter that is always sent in trailing form, such as
+    /// `USER alp 0 * :Real Name`.
+    pub fn with_trailing(
+        command: &str,
+        params: impl IntoIterator<Item = impl Into<String>>,
+        trailing: &str,
+    ) -> Message {
+        let mut params: Vec<String> = params.into_iter().map(Into::into).collect();
+        params.push(trailing.to_owned());
         Message {
             tags: Tags::default(),
             source: None,
             command: Command::parse(command),
-            params: vec![target.to_owned(), body.to_owned()],
+            params,
             trailing_form: true,
         }
+    }
+
+    /// Checks that this message can be written to the socket without changing
+    /// meaning.
+    ///
+    /// Call this on every outgoing message. A parameter containing CR or LF
+    /// would end the line early and let whatever follows be read by the server
+    /// as a second command, so text a user typed (or pasted) must never reach
+    /// the wire unchecked. The other rules catch messages the wire format
+    /// cannot represent: a non-final parameter with a space in it would be
+    /// split in two, and a line over the size limit would be truncated.
+    pub fn validate_for_send(&self) -> Result<(), SendError> {
+        let control = |s: &str| s.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0));
+
+        let name = self.command.to_string();
+        if name.is_empty() || name.bytes().any(|b| b == b' ' || b.is_ascii_control()) {
+            return Err(SendError::BadCommand);
+        }
+        for (key, _) in self.tags.iter() {
+            if key.is_empty()
+                || key
+                    .bytes()
+                    .any(|b| matches!(b, b' ' | b';' | b'=') || b.is_ascii_control())
+            {
+                return Err(SendError::BadTag);
+            }
+        }
+
+        let last = self.params.len().saturating_sub(1);
+        for (index, param) in self.params.iter().enumerate() {
+            if control(param) {
+                return Err(SendError::ForbiddenCharacter { index });
+            }
+            if index < last && requires_trailing_form(param) {
+                return Err(SendError::MalformedParameter { index });
+            }
+        }
+
+        let wire = self.to_wire();
+        let tags_bytes = if self.tags.is_empty() {
+            0
+        } else {
+            self.tags.to_string().len() + 2 // the '@' and the space
+        };
+        if tags_bytes > MAX_TAGS_BYTES {
+            return Err(SendError::TooLong { bytes: tags_bytes });
+        }
+        let body_bytes = wire.len() - tags_bytes + 2; // the CRLF
+        if body_bytes > MAX_MESSAGE_BYTES {
+            return Err(SendError::TooLong { bytes: body_bytes });
+        }
+        Ok(())
     }
 
     /// Parses one line. Any trailing CR and LF are stripped first, so the
@@ -666,5 +766,77 @@ mod tests {
     #[test]
     fn wire_line_terminates_with_crlf() {
         assert_eq!(Message::new("PING", ["x"]).to_wire_line(), "PING x\r\n");
+    }
+
+    #[test]
+    fn with_trailing_keeps_leading_parameters_separate() {
+        let m = Message::with_trailing("USER", ["alp", "0", "*"], "Alp Yılmaz");
+        assert_eq!(m.to_wire(), "USER alp 0 * :Alp Yılmaz");
+        assert_eq!(m.params.len(), 4);
+        assert_eq!(m.validate_for_send(), Ok(()));
+    }
+
+    #[test]
+    fn a_line_break_in_a_parameter_is_refused() {
+        // The injection this guards against: a pasted "hi\r\nQUIT" would put a
+        // second command on the wire.
+        let m = Message::with_body("PRIVMSG", "#c", "hi\r\nQUIT :gone");
+        assert_eq!(
+            m.validate_for_send(),
+            Err(SendError::ForbiddenCharacter { index: 1 })
+        );
+        for bad in ["a\nb", "a\rb", "a\0b"] {
+            assert!(Message::with_body("PRIVMSG", "#c", bad)
+                .validate_for_send()
+                .is_err());
+        }
+        assert!(Message::with_body("PRIVMSG", "#c\nQUIT", "x")
+            .validate_for_send()
+            .is_err());
+    }
+
+    #[test]
+    fn a_non_final_parameter_with_a_space_is_refused() {
+        let m = Message::new("JOIN", ["#a b", "key"]);
+        assert_eq!(
+            m.validate_for_send(),
+            Err(SendError::MalformedParameter { index: 0 })
+        );
+        assert!(Message::new("MODE", ["#c", "+o", "alp"])
+            .validate_for_send()
+            .is_ok());
+    }
+
+    #[test]
+    fn oversized_lines_are_refused() {
+        let ok = Message::with_body("PRIVMSG", "#c", &"x".repeat(400));
+        assert_eq!(ok.validate_for_send(), Ok(()));
+        let too_long = Message::with_body("PRIVMSG", "#c", &"x".repeat(600));
+        assert!(matches!(
+            too_long.validate_for_send(),
+            Err(SendError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn tags_do_not_count_against_the_512_byte_body_limit() {
+        let mut m = Message::with_body("PRIVMSG", "#c", &"x".repeat(480));
+        m.tags.set("+draft/reply", "a".repeat(200));
+        assert_eq!(m.validate_for_send(), Ok(()));
+    }
+
+    #[test]
+    fn a_tag_value_with_a_line_break_is_escaped_not_refused() {
+        let mut m = Message::new("PING", ["x"]);
+        m.tags.set("k", "a\nb");
+        assert_eq!(m.validate_for_send(), Ok(()));
+        assert_eq!(m.to_wire(), "@k=a\\nb PING x");
+    }
+
+    #[test]
+    fn a_bad_tag_key_is_refused() {
+        let mut m = Message::new("PING", ["x"]);
+        m.tags.set("bad key", "v");
+        assert_eq!(m.validate_for_send(), Err(SendError::BadTag));
     }
 }

@@ -52,7 +52,7 @@ pub use casemap::CaseMapping;
 pub use ctcp::Ctcp;
 pub use format::{Color, Span, Style};
 pub use isupport::{ChanModes, ISupport, ModeKind};
-pub use message::{Command, Message, ParseError, Source, Tags};
+pub use message::{Command, Message, ParseError, SendError, Source, Tags};
 pub use sasl::Mechanism;
 pub use split::{payload_budget, split_for_send, split_utf8};
 
@@ -143,7 +143,7 @@ mod integration {
         // without ending negotiation.
         sent.push(Message::new("CAP", ["LS", "302"]).to_wire());
         sent.push(Message::new("NICK", ["alp"]).to_wire());
-        sent.push(Message::with_body("USER", "alp 0 *", "Alp").to_wire());
+        sent.push(Message::with_trailing("USER", ["alp", "0", "*"], "Alp").to_wire());
 
         // The server answers across two lines.
         for line in [

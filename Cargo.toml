@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rhizome-proto"]
+members = ["crates/rhizome-proto", "crates/rhizome-client"]
 
 [workspace.package]
 version = "0.1.0"

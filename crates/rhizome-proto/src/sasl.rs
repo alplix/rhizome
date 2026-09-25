@@ -21,7 +21,10 @@ const CHUNK: usize = 400;
 const EMPTY: &str = "+";
 
 /// A SASL mechanism, with the credentials it needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is implemented by hand so the password never reaches a log line or
+/// a panic message.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Mechanism {
     /// Username and password in the clear, protected only by TLS.
     ///
@@ -40,6 +43,22 @@ pub enum Mechanism {
         /// Usually empty.
         authzid: String,
     },
+}
+
+impl std::fmt::Debug for Mechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mechanism::Plain { authcid, .. } => f
+                .debug_struct("Plain")
+                .field("authcid", authcid)
+                .field("password", &"<redacted>")
+                .finish(),
+            Mechanism::External { authzid } => f
+                .debug_struct("External")
+                .field("authzid", authzid)
+                .finish(),
+        }
+    }
 }
 
 impl Mechanism {
@@ -221,6 +240,17 @@ mod tests {
     #[test]
     fn base64_rejects_invalid_input() {
         assert_eq!(base64::decode("not valid!"), None);
+    }
+
+    #[test]
+    fn debug_output_never_contains_the_password() {
+        let m = Mechanism::Plain {
+            authcid: "alp".into(),
+            password: "hunter2".into(),
+        };
+        let shown = format!("{m:?}");
+        assert!(shown.contains("alp"));
+        assert!(!shown.contains("hunter2"), "password leaked: {shown}");
     }
 
     #[test]
