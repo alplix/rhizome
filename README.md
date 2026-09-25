@@ -8,19 +8,37 @@ shape, and the opposite of the centralised chat platforms that replaced it.
 
 ## Status
 
-Early, but it runs: a desktop window that connects to IRC networks over TLS,
-follows channels and members, keeps a searchable log of everything it sees, and
-survives a restart. It has been exercised end to end in its real window (see
-*Testing*), but it has not yet been used day to day, and it is not packaged: you
-run it from source.
+Version 0.2.0: a desktop app for Windows that connects to IRC networks over
+TLS, follows channels and members, keeps a searchable log of everything it sees,
+remembers what you have read, and survives a restart. Seven themes, English and
+Turkish. It has been exercised end to end in its real window (see *Testing*),
+but it has not yet had a week of daily use.
 
 | Crate | State |
 |---|---|
-| `rhizome-proto` | ✅ Complete — 107 tests |
-| `rhizome-client` | ✅ Engine complete — 89 tests, verified live against Libera.Chat |
-| `rhizome-store` | ✅ Complete — 73 tests; message log and full-text search on SQLite FTS5 |
-| `rhizome-app` | ✅ Working — Tauri v2 window joining engine and store; 40 tests |
-| `ui/` | ✅ Working — plain JavaScript, no build step; 74 tests |
+| `rhizome-proto` | ✅ Complete — 108 tests |
+| `rhizome-client` | ✅ Engine complete — 90 tests, verified live against Libera.Chat |
+| `rhizome-store` | ✅ Complete — 88 tests; message log and full-text search on SQLite FTS5 |
+| `rhizome-app` | ✅ Working — Tauri v2 window joining engine and store; 81 tests + 42 end-to-end checks |
+| `ui/` | ✅ Working — plain JavaScript, no build step; 130 tests |
+
+Only **Windows** has been built and tested. The Rust code is not Windows-specific
+(the credential store has macOS and Linux back ends configured), but nothing
+else has been compiled, so treat other systems as untried.
+
+## Install
+
+Download `Rhizome_<version>_x64-setup.exe` from the releases page and run it. It
+installs for the current user only and needs no administrator rights. Windows 11
+already includes WebView2; the installer fetches it on Windows 10.
+
+**The installer is not code-signed**, so Windows SmartScreen will say the
+publisher is unknown ("More info" → "Run anyway"). Signing needs a paid
+certificate; until there is one, verify the download against the checksum
+published with the release, or build from source.
+
+There is no auto-updater: install a newer version over the old one, and your
+networks, settings and log are kept.
 
 ## Why build this
 
@@ -147,27 +165,43 @@ search box understands what a developer types:
 - **Paging is by cursor, not offset,** so messages arriving while you scroll
   cannot shift a page and repeat or skip lines.
 
-What is logged today is chat text (messages, notices and `/me` actions).
-Joins, parts, quits and topic changes are reported by the engine but not yet
-stored, so a scrollback view will not show them.
+What is logged is chat text (messages, notices and `/me` actions) and, as
+separate lines, joins, parts, quits, kicks, nick changes, topic changes and
+channel mode changes. Event lines are shown in the scrollback and can be
+switched off in Settings, but they are never searched, never counted as unread
+and never raise a notification.
 
 ## The window
 
 - **Three panes:** networks and conversations with unread and mention badges;
   the messages with day dividers and an "unread" marker; the channel's members.
-  On a narrow screen the side panes become drawers.
+  On a narrow screen the side panes become drawers. A first run shows a welcome
+  screen with one-click presets for Libera.Chat, OFTC and hackint.
+- **Themes:** Graphite, Midnight, Forest, Paper, Daylight and a High contrast
+  theme, or *System* to follow the operating system. Six accent colours,
+  comfortable or compact spacing, three text sizes. Every theme and accent is
+  checked by a test against WCAG contrast thresholds, including all nick colours.
+- **Languages:** English and Türkçe, chosen automatically or in Settings. A test
+  fails if a translation is missing, has a different placeholder, or is unused.
+- **Read markers are remembered** in the log, so unread counts and the "unread"
+  line are right after a restart.
+- **Notifications** for mentions and private messages while the window is not in
+  front; switchable in Settings.
+- **Autoconnect** per network, and **Remember password**, which stores it in the
+  operating system's credential store (Windows Credential Manager). It is never
+  written to a file in the data directory, and a failed login deletes it.
 - **Search (Ctrl+K)** over everything logged, across networks or in one, by best
   match or newest. Opening a result shows it in its conversation, with a way back
   to the live end.
 - **Typing:** Tab completes nicks, ↑ recalls what you sent, `/help` lists the
-  commands. A typo such as `/joinn` is reported, never posted as chat.
+  commands (including `/clear`). A typo such as `/joinn` is reported, never
+  posted as chat.
 - **Pasting** more than three lines asks first, and each line then goes out as its
   own message under the rate limit.
 - **IRC colours stay readable:** colours chosen for a white or black page are
-  nudged until they have enough contrast on the current theme. Light and dark
-  follow the system.
-- **Saved networks** keep everything except the password, which is asked for when
-  you connect and is wiped from the field as soon as it is read.
+  nudged until they have enough contrast on the current theme.
+- **One window:** starting Rhizome again focuses the running one, and the window
+  reopens where you left it.
 
 ## Safety properties
 
@@ -207,6 +241,16 @@ QUIT` becomes chat text, never a second command; this is
 
 ## Building
 
+To produce the Windows installer (needs Node for the Tauri CLI; NSIS is fetched
+automatically):
+
+```bash
+cd crates/rhizome-app
+npx @tauri-apps/cli@2 build --bundles nsis
+```
+
+The result is `target/release/bundle/nsis/Rhizome_<version>_x64-setup.exe`.
+
 On Windows you need the MSVC build tools and WebView2 (already part of
 Windows 11). Minimum Rust versions, taken from what each crate's dependencies
 declare: `rhizome-proto` 1.75, `rhizome-client` and `rhizome-store` 1.85,
@@ -225,7 +269,7 @@ Run the application:
 cargo run -p rhizome-app
 ```
 
-Add a network with the **+** button, connect, and join a channel with
+Pick a preset on the welcome screen (or add a network with the **+** button), connect, and join a channel with
 `/join #channel`. Your messages and settings are kept in the application's data
 directory (`%APPDATA%\org.rhizome.irc` on Windows).
 
@@ -259,28 +303,31 @@ That client does not write to the log; the desktop app does.
 |---|---|---|
 | Protocol, engine, store, app core | Rust unit and integration tests | `cargo test --workspace` |
 | Interface logic (commands, links, state) | `ui/tests` | `node --test "ui/tests/*.test.mjs"` |
-| **The real window** | `crates/rhizome-app/e2e/webview_e2e.py` | `python crates/rhizome-app/e2e/webview_e2e.py` (Windows, after `cargo build -p rhizome-app`) |
+| **The real window** | `crates/rhizome-app/e2e/webview_e2e.py` | `python crates/rhizome-app/e2e/webview_e2e.py` (Windows, after `cargo build -p rhizome-app`; set `RHIZOME_EXE` to test the release build) |
 
 The last one launches the actual application, drives its WebView2 page over the
 DevTools Protocol and connects it to a scripted IRC server on localhost. It is
 the only test that exercises the Tauri glue: the IPC commands, event delivery,
-the capability set, the content security policy, the navigation guard and
-persistence across a restart. It refuses to run if the application's data
+the capability set, the content security policy, the navigation guard, and
+settings, read markers and the log surviving a restart. It refuses to run if the application's data
 directory already exists, so it cannot touch real data.
 
-## Next steps
+## Known limitations
 
-1. Use it for real, and fix what that shows. Nothing here has had a week of daily use.
-2. Log joins, parts, quits and topics, and persist read markers so unread counts
-   survive a restart.
-3. Desktop notifications for mentions; packaging (an installer) and a release
-   build; the Android target.
-4. Store the password in the operating system's credential store as an option,
-   instead of asking each time.
-5. Client certificates for SASL `EXTERNAL`. The protocol layer already models
-   it; the driver does not yet load a certificate.
-6. An opt-in way to accept a self-signed server certificate.
-7. Translating the interface (it is English only), and right-to-left text.
+Things that are not done, stated plainly:
+
+- **Windows only, so far.** No Android build (the NDK is not installed and the
+  app crate is not set up as a mobile library), and macOS and Linux are untried.
+- **No auto-updater and no code signing** (see *Install*).
+- **No SASL `EXTERNAL`.** The protocol layer models it; the driver does not load
+  a client certificate.
+- **No way to accept a self-signed server certificate.** A server whose
+  certificate does not verify cannot be connected to.
+- **Dotless `ı` is not folded in search**, as described above.
+- **No link previews and no multiline paste yet** — the paste and unfurl ideas in
+  *Why build this* are the plan, not the present.
+- **Right-to-left text** has not been designed for or tested.
+- **Nothing here has had weeks of daily use.**
 
 ## Licence
 
@@ -291,9 +338,9 @@ GPL-3.0-or-later, for every crate. See `LICENSE`.
 - **Send rate.** The default is a burst of 5 then 1 message per second,
   deliberately conservative and configurable per connection. It has not been
   tuned against any particular network's actual flood limit.
-- **Android.** The desktop app now runs, so this is next when wanted. Tauri v2 targets
-  Android, but the app crate is not yet set up as a mobile library and the NDK is
-  not installed. The layout already collapses to drawers on a narrow screen.
+- **Android.** Tauri v2 targets Android, but the app crate is not yet set up as a
+  mobile library and the NDK is not installed. The layout already collapses to
+  drawers on a narrow screen.
 - **Bouncer.** Optional. The client works standalone with its own local log;
   a bouncer such as soju only matters for staying connected while the client
   is closed.

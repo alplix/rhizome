@@ -16,6 +16,8 @@ rhizome-app`:
 
     python crates/rhizome-app/e2e/webview_e2e.py
 
+Set RHIZOME_EXE to test another build, e.g. the release executable.
+
 It uses the application's real data directories and removes them when it
 finishes; it refuses to start if they already exist, so it can never touch
 someone's real profiles or message log.
@@ -36,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-EXE = ROOT / "target" / "debug" / "rhizome.exe"
+EXE = Path(os.environ.get("RHIZOME_EXE") or ROOT / "target" / "debug" / "rhizome.exe")
 IDENTIFIER = "org.rhizome.irc"
 DATA_DIRS = [
     Path(os.environ.get("APPDATA", "")) / IDENTIFIER,
@@ -270,16 +272,16 @@ def main():
         boot = json.loads(page.evaluate("JSON.stringify({tauri: !!window.__TAURI__, mode: window.__rhizome.api.mode})"))
         check("the interface finds the real Tauri bridge, not the demo", boot["tauri"] and boot["mode"] == "tauri", str(boot))
         check("the store opened without complaint", page.evaluate("window.__rhizome.api.startupNotices().then(n => n.length === 0)"))
-        check("with no saved networks the interface offers to add one", wait_for(page, "document.getElementById('profile-dialog').open"))
+        check("with no saved networks the interface shows the welcome screen with presets", wait_for(page, "!document.getElementById('welcome').hidden && document.querySelectorAll('#welcome-presets button').length >= 3"))
 
         # A profile with a bad nick is rejected by the backend, whatever the interface allows.
         rejected = page.evaluate(
-            "window.__rhizome.api.saveProfile({id:'bad',name:'x',host:'h',port:6667,tls:false,nick:'a b',username:'a',realname:'r',channels:[],sasl_account:null}).then(() => 'accepted', e => String(e))"
+            "window.__rhizome.api.saveProfile({id:'bad',name:'x',host:'h',port:6667,tls:false,nick:'a b',username:'a',realname:'r',channels:[],sasl_account:null,autoconnect:false}).then(() => 'accepted', e => String(e))"
         )
         check("the backend rejects an invalid profile", rejected != "accepted" and "nick" in rejected, rejected)
 
         page.evaluate(
-            "window.__rhizome.api.saveProfile({id:'e2e',name:'E2E',host:'127.0.0.1',port:%d,tls:false,nick:'alp',username:'alp',realname:'Rhizome',channels:['#e2e'],sasl_account:null})"
+            "window.__rhizome.api.saveProfile({id:'e2e',name:'E2E',host:'127.0.0.1',port:%d,tls:false,nick:'alp',username:'alp',realname:'Rhizome',channels:['#e2e'],sasl_account:null,autoconnect:false})"
             % irc.port
         )
         page.evaluate("document.getElementById('profile-dialog').close()")
@@ -311,6 +313,24 @@ def main():
         })())"""))
         check("the message is drawn with styling, a link and no control characters",
               dom.get("found") and dom["bold"] == ["hello"] and dom["link"] == "https://example.com/e2e" and dom["highlighted"] and dom["turkish"] and not dom["controlChars"], str(dom))
+
+        check("no password is saved for a network that never had one", page.evaluate("window.__rhizome.api.hasSavedPassword('e2e')") is False)
+
+        # Join/part lines come from the backend and are kept in the log.
+        check("our own join is kept in the log as an event line", wait_for(
+            page, "window.__rhizome.api.scrollback('e2e', '#e2e', null, 50).then(m => m.some(x => x.kind === 'event' && x.event.verb === 'join'))"))
+        check("event lines are drawn in the page", wait_for(page, "!!document.querySelector('#messages .line.event')"))
+
+        # Settings: defaults, then a change that must survive a restart.
+        defaults = json.loads(page.evaluate("window.__rhizome.api.getSettings().then(s => JSON.stringify(s))"))
+        check("settings start at their defaults", defaults.get("theme") == "system" and defaults.get("show_events") is True, str(defaults))
+        page.evaluate("window.__rhizome.api.saveSettings({...%s, theme: 'paper', accent: 'rose', language: 'tr'})" % json.dumps(defaults))
+        check("saving settings works", page.evaluate("window.__rhizome.api.getSettings().then(s => s.theme)") == "paper")
+
+        # Read markers: reading a conversation is remembered in the log.
+        page.evaluate("window.__rhizome.api.markRead('e2e', '#e2e', 4000000000000)")
+        unread = page.evaluate("window.__rhizome.api.buffers('e2e').then(b => b.find(x => x.name === '#e2e').unread)")
+        check("a conversation marked read has nothing unread", unread == 0, str(unread))
 
         # ---- sending ---------------------------------------------------------------------
         page.evaluate("window.__rhizome.api.sendMessage('e2e', '#e2e', 'merhaba dünya, şu hatayı gördün mü?')")
@@ -376,6 +396,13 @@ def main():
 
         proc, page, _ = launch()
         check("the saved network is there after a restart", wait_for(page, "window.__rhizome.state.networks.has('e2e')"))
+        settings = json.loads(page.evaluate("window.__rhizome.api.getSettings().then(s => JSON.stringify(s))"))
+        check("settings survive a restart", settings.get("theme") == "paper" and settings.get("accent") == "rose", str(settings))
+        check("the saved theme is applied before anything is drawn", wait_for(page, "document.documentElement.dataset.theme === 'paper'"))
+        check("the saved language is applied", wait_for(page, "document.documentElement.lang === 'tr'"))
+        unread_after = page.evaluate("window.__rhizome.api.buffers('e2e').then(b => b.find(x => x.name === '#e2e').unread)")
+        check("the read marker survives a restart", unread_after == 0, str(unread_after))
+        check("the settings file is plain JSON on disk", json.loads((DATA_DIRS[0] / "settings.json").read_text())["theme"] == "paper")
         history = page.evaluate("window.__rhizome.api.scrollback('e2e', '#e2e', null, 50).then(m => m.map(x => x.sender + ': ' + x.plain))")
         check("the conversation is read back from disk", any("fake server" in h for h in history) and any("merhaba" in h for h in history), str(history))
         found = page.evaluate("window.__rhizome.api.search('hello from:bob', null, false, 10).then(h => h.length)")

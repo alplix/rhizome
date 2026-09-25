@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Rhizome",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "org.rhizome.irc",
   "build": {
     "frontendDist": "../../ui"
@@ -14,12 +14,30 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "Alp",
+    "copyright": "Copyright \u00a9 2026 Alp. GPL-3.0-or-later.",
+    "shortDescription": "A modern IRC client for developer networks",
+    "longDescription": "Rhizome is a modern, private, local-first IRC client for developer networks such as Libera.Chat, OFTC and hackint.",
+    "category": "SocialNetworking",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English",
+          "Turkish"
+        ],
+        "displayLanguageSelector": true
+      }
+    }
   }
 }
