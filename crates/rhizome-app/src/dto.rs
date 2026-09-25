@@ -11,7 +11,7 @@
 
 use rhizome_client::{ChatMessage, Event, Member, MessageKind};
 use rhizome_proto::format::{self, Color};
-use rhizome_store::{Cursor, Kind, SearchHit, StoredMessage, MARK_END, MARK_START};
+use rhizome_store::{Cursor, Kind, NewMessage, SearchHit, StoredMessage, MARK_END, MARK_START};
 use serde::{Deserialize, Serialize};
 
 fn is_false(b: &bool) -> bool {
@@ -74,6 +74,9 @@ pub enum UiKind {
     Privmsg,
     Notice,
     Action,
+    /// Something that happened rather than something said: a join, a part.
+    /// Such a message carries [`UiMessage::event`] instead of text.
+    Event,
 }
 
 impl From<MessageKind> for UiKind {
@@ -92,6 +95,7 @@ impl From<Kind> for UiKind {
             Kind::Privmsg => UiKind::Privmsg,
             Kind::Notice => UiKind::Notice,
             Kind::Action => UiKind::Action,
+            Kind::Event => UiKind::Event,
         }
     }
 }
@@ -114,6 +118,196 @@ pub struct UiMessage {
     pub highlight: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub msgid: Option<String>,
+    /// For an event line: what happened. The interface words it in the person's
+    /// language, so this carries a verb and its arguments and no prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<UiEventLine>,
+}
+
+/// What an event line says, without saying it in any language.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UiEventLine {
+    /// `join`, `part`, `quit`, `kick`, `nick`, `topic` or `mode`.
+    pub verb: String,
+    pub args: Vec<String>,
+}
+
+/// Packs an event into the text the log stores for it: a JSON array, verb first.
+///
+/// JSON rather than a separator character, because the arguments are text from
+/// strangers (a quit reason, a topic) that can contain any character.
+pub fn encode_event(verb: &str, args: &[String]) -> String {
+    let mut parts = vec![verb.to_owned()];
+    parts.extend(args.iter().cloned());
+    serde_json::to_string(&parts).expect("a list of strings always serialises")
+}
+
+/// The inverse of [`encode_event`]. Text that is not one (a row written by a
+/// different version) decodes to the verb `unknown`, so a bad row is shown as
+/// something rather than breaking the history it is in.
+pub fn decode_event(text: &str) -> UiEventLine {
+    match serde_json::from_str::<Vec<String>>(text) {
+        Ok(mut parts) if !parts.is_empty() => {
+            let verb = parts.remove(0);
+            UiEventLine { verb, args: parts }
+        }
+        _ => UiEventLine {
+            verb: "unknown".to_owned(),
+            args: Vec::new(),
+        },
+    }
+}
+
+/// Something that happened in a conversation, ready to be shown and logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventLine {
+    pub buffer: String,
+    /// Who did it (the actor), or for a join, part or quit, who it happened to.
+    pub sender: String,
+    pub verb: &'static str,
+    pub args: Vec<String>,
+    /// Whether it concerns us: we joined, we left, we were removed, we renamed.
+    pub own: bool,
+}
+
+impl EventLine {
+    pub fn to_new_message(&self, network: &str, now_ms: i64) -> NewMessage {
+        NewMessage {
+            network: network.to_owned(),
+            buffer: self.buffer.clone(),
+            sender: self.sender.clone(),
+            kind: Kind::Event,
+            text: encode_event(self.verb, &self.args),
+            server_time: None,
+            received_ms: now_ms,
+            msgid: None,
+            own: self.own,
+            highlight: false,
+        }
+    }
+
+    pub fn to_ui(&self, network: &str, now_ms: i64) -> UiMessage {
+        UiMessage {
+            id: None,
+            network: network.to_owned(),
+            buffer: self.buffer.clone(),
+            sender: self.sender.clone(),
+            kind: UiKind::Event,
+            spans: Vec::new(),
+            plain: String::new(),
+            time_ms: now_ms,
+            own: self.own,
+            highlight: false,
+            msgid: None,
+            event: Some(UiEventLine {
+                verb: self.verb.to_owned(),
+                args: self.args.clone(),
+            }),
+        }
+    }
+}
+
+fn is_channel(name: &str) -> bool {
+    name.starts_with(['#', '&', '!', '+'])
+}
+
+fn plain(text: &str) -> String {
+    format::strip(text)
+}
+
+/// The lines an engine event should leave in the history.
+///
+/// `own_nick` is our nick, for the events that are about us. Most events give
+/// one line; a quit or a nick change is reported by the network once but
+/// belongs in every channel the person was in, so it gives one per channel.
+/// Events that are only state (a member list, a connection change) give none.
+pub fn event_lines(event: &Event, own_nick: &str) -> Vec<EventLine> {
+    let line =
+        |buffer: &str, sender: &str, verb: &'static str, args: Vec<String>, own: bool| EventLine {
+            buffer: buffer.to_owned(),
+            sender: sender.to_owned(),
+            verb,
+            args,
+            own,
+        };
+    let reason = |r: &Option<String>| plain(r.as_deref().unwrap_or(""));
+
+    match event {
+        Event::Joined { channel } => vec![line(channel, own_nick, "join", vec![], true)],
+        Event::Parted { channel, reason: r } => {
+            vec![line(channel, own_nick, "part", vec![reason(r)], true)]
+        }
+        Event::Kicked {
+            channel,
+            by,
+            reason: r,
+        } => {
+            vec![line(
+                channel,
+                by,
+                "kick",
+                vec![own_nick.to_owned(), reason(r)],
+                true,
+            )]
+        }
+        Event::MemberJoined { channel, nick, .. } => {
+            vec![line(channel, nick, "join", vec![], false)]
+        }
+        Event::MemberParted {
+            channel,
+            nick,
+            reason: r,
+        } => {
+            vec![line(channel, nick, "part", vec![reason(r)], false)]
+        }
+        Event::MemberKicked {
+            channel,
+            nick,
+            by,
+            reason: r,
+        } => {
+            vec![line(
+                channel,
+                by,
+                "kick",
+                vec![nick.clone(), reason(r)],
+                false,
+            )]
+        }
+        Event::MemberQuit {
+            nick,
+            reason: r,
+            channels,
+        } => channels
+            .iter()
+            .map(|c| line(c, nick, "quit", vec![reason(r)], false))
+            .collect(),
+        Event::NickChanged {
+            old,
+            new,
+            channels,
+            own,
+        } => channels
+            .iter()
+            .map(|c| line(c, old, "nick", vec![new.clone()], *own))
+            .collect(),
+        // A topic reply on joining has no author and is not a change.
+        Event::Topic {
+            channel,
+            topic,
+            by: Some(by),
+        } => vec![line(
+            channel,
+            by,
+            "topic",
+            vec![plain(topic.as_deref().unwrap_or(""))],
+            false,
+        )],
+        Event::Mode { target, by, modes } if is_channel(target) => {
+            vec![line(target, by, "mode", vec![modes.clone()], false)]
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl UiMessage {
@@ -135,22 +329,30 @@ impl UiMessage {
             own: m.own,
             highlight: m.highlight,
             msgid: m.msgid.clone(),
+            event: None,
         }
     }
 
     pub fn from_stored(m: &StoredMessage) -> UiMessage {
+        let is_event = m.kind == Kind::Event;
         UiMessage {
             id: Some(m.id),
             network: m.network.clone(),
             buffer: m.buffer.clone(),
             sender: m.sender.clone(),
             kind: m.kind.into(),
-            spans: spans(&m.text),
-            plain: format::strip(&m.text),
+            // An event's text is a packed description, not something to render.
+            spans: if is_event { Vec::new() } else { spans(&m.text) },
+            plain: if is_event {
+                String::new()
+            } else {
+                format::strip(&m.text)
+            },
             time_ms: m.time_ms,
             own: m.own,
             highlight: m.highlight,
             msgid: m.msgid.clone(),
+            event: is_event.then(|| decode_event(&m.text)),
         }
     }
 }
@@ -250,6 +452,10 @@ pub struct UiBuffer {
     pub name: String,
     pub messages: i64,
     pub last_time_ms: Option<i64>,
+    /// Messages from others since the conversation was last marked read.
+    pub unread: i64,
+    /// How many of those mention us or are private messages.
+    pub highlights: i64,
 }
 
 /// What happened, in the interface's terms.
@@ -334,6 +540,9 @@ pub enum UiEvent {
         channel: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         topic: Option<String>,
+        /// Who changed it; absent for the topic reported on joining.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     Names {
         channel: String,
@@ -354,6 +563,9 @@ pub enum UiEvent {
     },
     AuthFailed {
         reason: String,
+        /// Whether a saved password was discarded because of it, so the person
+        /// is not left wondering why the next attempt asks again.
+        forgot_password: bool,
     },
 }
 
@@ -449,9 +661,10 @@ impl UiEvent {
                 channels: channels.clone(),
                 own: *own,
             },
-            Event::Topic { channel, topic } => UiEvent::Topic {
+            Event::Topic { channel, topic, by } => UiEvent::Topic {
                 channel: channel.clone(),
                 topic: topic.clone(),
+                by: by.clone(),
             },
             Event::Names { channel, members } => UiEvent::Names {
                 channel: channel.clone(),
@@ -469,6 +682,7 @@ impl UiEvent {
             Event::ServerError(text) => UiEvent::ServerError { text: text.clone() },
             Event::AuthFailed(reason) => UiEvent::AuthFailed {
                 reason: reason.clone(),
+                forgot_password: false,
             },
         }
     }
@@ -521,7 +735,10 @@ mod tests {
     fn hostile_markup_in_a_message_is_just_text() {
         let s = spans("<img src=x onerror=alert(1)><script>alert(2)</script>");
         assert_eq!(s.len(), 1);
-        assert_eq!(s[0].text, "<img src=x onerror=alert(1)><script>alert(2)</script>");
+        assert_eq!(
+            s[0].text,
+            "<img src=x onerror=alert(1)><script>alert(2)</script>"
+        );
     }
 
     #[test]
@@ -530,9 +747,18 @@ mod tests {
         assert_eq!(
             snippet_parts(&s),
             vec![
-                SnippetPart { text: "see ".into(), hit: false },
-                SnippetPart { text: "needle".into(), hit: true },
-                SnippetPart { text: " in [the] <b>hay</b>".into(), hit: false },
+                SnippetPart {
+                    text: "see ".into(),
+                    hit: false
+                },
+                SnippetPart {
+                    text: "needle".into(),
+                    hit: true
+                },
+                SnippetPart {
+                    text: " in [the] <b>hay</b>".into(),
+                    hit: false
+                },
             ]
         );
         assert_eq!(snippet_parts(""), vec![]);
@@ -551,7 +777,10 @@ mod tests {
             own: false,
             highlight: true,
         };
-        assert_eq!(UiMessage::from_chat("net", &chat, 5).time_ms, 1_790_330_400_000);
+        assert_eq!(
+            UiMessage::from_chat("net", &chat, 5).time_ms,
+            1_790_330_400_000
+        );
         chat.time = None;
         assert_eq!(UiMessage::from_chat("net", &chat, 5).time_ms, 5);
         let m = UiMessage::from_chat("net", &chat, 5);
@@ -615,5 +844,285 @@ mod tests {
         assert_eq!(serde_json::from_str::<UiCursor>(&json).unwrap(), c);
         let store: Cursor = c.into();
         assert_eq!(UiCursor::from(store), c);
+    }
+
+    // ---- event lines --------------------------------------------------------
+
+    #[test]
+    fn an_event_survives_being_packed_for_the_log() {
+        for args in [
+            vec![],
+            vec!["".to_owned()],
+            vec!["going home, bye".to_owned()],
+            vec![
+                "\"quoted\" \\ back\\slash".to_owned(),
+                "line\nbreak\ttab".to_owned(),
+            ],
+            vec!["Türkçe şğüöç İ ı 🎉".to_owned()],
+            vec!["a".repeat(2000)],
+        ] {
+            let text = encode_event("part", &args);
+            let back = decode_event(&text);
+            assert_eq!(back.verb, "part");
+            assert_eq!(back.args, args, "through {text}");
+        }
+    }
+
+    #[test]
+    fn a_row_that_is_not_a_packed_event_still_decodes_to_something() {
+        for junk in ["", "not json", "{\"a\":1}", "[]", "[1,2]", "null"] {
+            let e = decode_event(junk);
+            assert_eq!(e.verb, "unknown", "{junk:?}");
+            assert!(e.args.is_empty());
+        }
+    }
+
+    fn lines_of(event: Event) -> Vec<(String, String, &'static str, Vec<String>, bool)> {
+        event_lines(&event, "alp")
+            .into_iter()
+            .map(|l| (l.buffer, l.sender, l.verb, l.args, l.own))
+            .collect()
+    }
+
+    fn s(x: &str) -> String {
+        x.to_owned()
+    }
+
+    #[test]
+    fn joins_and_parts_become_lines_about_the_right_person() {
+        assert_eq!(
+            lines_of(Event::Joined { channel: s("#c") }),
+            vec![(s("#c"), s("alp"), "join", vec![], true)],
+            "our own join names us and is flagged"
+        );
+        assert_eq!(
+            lines_of(Event::MemberJoined {
+                channel: s("#c"),
+                nick: s("bob"),
+                account: None
+            }),
+            vec![(s("#c"), s("bob"), "join", vec![], false)]
+        );
+        assert_eq!(
+            lines_of(Event::Parted {
+                channel: s("#c"),
+                reason: Some(s("\u{2}bye\u{2}"))
+            }),
+            vec![(s("#c"), s("alp"), "part", vec![s("bye")], true)],
+            "formatting codes are stripped from reasons"
+        );
+        assert_eq!(
+            lines_of(Event::MemberParted {
+                channel: s("#c"),
+                nick: s("bob"),
+                reason: None
+            }),
+            vec![(s("#c"), s("bob"), "part", vec![s("")], false)]
+        );
+    }
+
+    #[test]
+    fn a_kick_names_the_actor_and_the_victim() {
+        assert_eq!(
+            lines_of(Event::MemberKicked {
+                channel: s("#c"),
+                nick: s("bob"),
+                by: s("op"),
+                reason: Some(s("spam"))
+            }),
+            vec![(s("#c"), s("op"), "kick", vec![s("bob"), s("spam")], false)]
+        );
+        assert_eq!(
+            lines_of(Event::Kicked {
+                channel: s("#c"),
+                by: s("op"),
+                reason: None
+            }),
+            vec![(s("#c"), s("op"), "kick", vec![s("alp"), s("")], true)],
+            "when it is us, the victim is us"
+        );
+    }
+
+    #[test]
+    fn a_quit_or_nick_change_leaves_a_line_in_every_shared_channel() {
+        let quit = lines_of(Event::MemberQuit {
+            nick: s("bob"),
+            reason: Some(s("Ping timeout")),
+            channels: vec![s("#a"), s("#b")],
+        });
+        assert_eq!(quit.len(), 2);
+        assert_eq!(
+            quit[0],
+            (s("#a"), s("bob"), "quit", vec![s("Ping timeout")], false)
+        );
+        assert_eq!(quit[1].0, "#b");
+
+        let nick = lines_of(Event::NickChanged {
+            old: s("bob"),
+            new: s("robert"),
+            channels: vec![s("#a")],
+            own: false,
+        });
+        assert_eq!(
+            nick,
+            vec![(s("#a"), s("bob"), "nick", vec![s("robert")], false)]
+        );
+        let mine = lines_of(Event::NickChanged {
+            old: s("alp"),
+            new: s("alp2"),
+            channels: vec![s("#a")],
+            own: true,
+        });
+        assert!(mine[0].4);
+
+        // Nobody in common: nothing to record anywhere.
+        assert!(lines_of(Event::MemberQuit {
+            nick: s("x"),
+            reason: None,
+            channels: vec![]
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn a_topic_change_is_a_line_but_the_topic_shown_on_joining_is_not() {
+        assert_eq!(
+            lines_of(Event::Topic {
+                channel: s("#c"),
+                topic: Some(s("new topic")),
+                by: Some(s("op"))
+            }),
+            vec![(s("#c"), s("op"), "topic", vec![s("new topic")], false)]
+        );
+        assert!(lines_of(Event::Topic {
+            channel: s("#c"),
+            topic: Some(s("x")),
+            by: None
+        })
+        .is_empty());
+        // Clearing a topic is a change with nothing in it.
+        assert_eq!(
+            lines_of(Event::Topic {
+                channel: s("#c"),
+                topic: None,
+                by: Some(s("op"))
+            })[0]
+                .3,
+            vec![s("")]
+        );
+    }
+
+    #[test]
+    fn channel_modes_are_lines_but_user_modes_are_not() {
+        assert_eq!(
+            lines_of(Event::Mode {
+                target: s("#c"),
+                by: s("op"),
+                modes: s("+o bob")
+            }),
+            vec![(s("#c"), s("op"), "mode", vec![s("+o bob")], false)]
+        );
+        assert!(lines_of(Event::Mode {
+            target: s("alp"),
+            by: s("alp"),
+            modes: s("+i")
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn state_only_events_leave_no_line() {
+        for e in [
+            Event::Connecting,
+            Event::Connected,
+            Event::Registered { nick: s("alp") },
+            Event::Names {
+                channel: s("#c"),
+                members: vec![],
+            },
+            Event::Server(s("hello")),
+            Event::Error {
+                code: 1,
+                text: s("x"),
+            },
+        ] {
+            assert!(event_lines(&e, "alp").is_empty(), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn an_event_line_serialises_as_a_verb_and_arguments() {
+        let ui = event_lines(
+            &Event::MemberQuit {
+                nick: s("bob"),
+                reason: Some(s("gone")),
+                channels: vec![s("#c")],
+            },
+            "alp",
+        )
+        .remove(0)
+        .to_ui("net", 42);
+        let json = serde_json::to_value(&ui).unwrap();
+        assert_eq!(json["kind"], "event");
+        assert_eq!(json["event"]["verb"], "quit");
+        assert_eq!(json["event"]["args"][0], "gone");
+        assert_eq!(json["time_ms"], 42);
+        assert_eq!(json["spans"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_stored_event_comes_back_as_an_event_not_as_text() {
+        let line = event_lines(
+            &Event::MemberParted {
+                channel: s("#c"),
+                nick: s("bob"),
+                reason: Some(s("later")),
+            },
+            "alp",
+        )
+        .remove(0);
+        let new = line.to_new_message("net", 1000);
+        assert_eq!(new.kind, Kind::Event);
+        let stored = StoredMessage {
+            id: 7,
+            network: new.network,
+            buffer: new.buffer,
+            time_ms: 1000,
+            sender: new.sender,
+            kind: new.kind,
+            text: new.text,
+            own: new.own,
+            highlight: false,
+            msgid: None,
+        };
+        let ui = UiMessage::from_stored(&stored);
+        assert_eq!(ui.kind, UiKind::Event);
+        assert_eq!(ui.id, Some(7));
+        let event = ui.event.expect("the event is unpacked");
+        assert_eq!(
+            (event.verb.as_str(), event.args),
+            ("part", vec![s("later")])
+        );
+        assert!(ui.spans.is_empty() && ui.plain.is_empty());
+    }
+
+    #[test]
+    fn a_topic_event_reports_who_changed_it() {
+        let event = Event::Topic {
+            channel: s("#c"),
+            topic: Some(s("t")),
+            by: Some(s("op")),
+        };
+        let json = serde_json::to_value(UiEvent::from_event("n", &event, 0)).unwrap();
+        assert_eq!(json["by"], "op");
+        let join = Event::Topic {
+            channel: s("#c"),
+            topic: Some(s("t")),
+            by: None,
+        };
+        assert!(serde_json::to_value(UiEvent::from_event("n", &join, 0))
+            .unwrap()
+            .get("by")
+            .is_none());
     }
 }

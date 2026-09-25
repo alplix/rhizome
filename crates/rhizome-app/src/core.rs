@@ -16,7 +16,8 @@ use rhizome_client::{spawn, ChatMessage, Client, Config, Event, Handle, MessageK
 use rhizome_store::{Kind, NewMessage, SearchOptions, SearchOrder};
 use tokio::sync::mpsc;
 
-use crate::dto::{Envelope, UiBuffer, UiCursor, UiEvent, UiHit, UiMessage};
+use crate::dto::{event_lines, Envelope, UiBuffer, UiCursor, UiEvent, UiHit, UiMessage};
+use crate::secrets::SecretStore;
 use crate::storehost::StoreHost;
 
 /// The quit message shown to others when we disconnect.
@@ -31,6 +32,9 @@ struct Running {
 
 struct Inner {
     store: StoreHost,
+    /// Where remembered passwords live. Consulted here only to discard one that
+    /// has just been shown not to work.
+    secrets: Arc<dyn SecretStore>,
     out: mpsc::UnboundedSender<Envelope>,
     networks: Mutex<HashMap<String, Running>>,
     next_generation: AtomicU64,
@@ -51,7 +55,9 @@ impl std::fmt::Debug for Core {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic elsewhere while holding this lock must not take the whole
     // application down with it; the map is always left in a valid state.
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The current time in milliseconds since the Unix epoch.
@@ -83,11 +89,15 @@ fn new_message(network: &str, m: &ChatMessage, received_ms: i64) -> NewMessage {
 impl Core {
     /// Creates the core. Everything that happens is sent to the returned
     /// receiver, which the caller drains into the interface.
-    pub fn new(store: StoreHost) -> (Core, mpsc::UnboundedReceiver<Envelope>) {
+    pub fn new(
+        store: StoreHost,
+        secrets: Arc<dyn SecretStore>,
+    ) -> (Core, mpsc::UnboundedReceiver<Envelope>) {
         let (out, events) = mpsc::unbounded_channel();
         let core = Core {
             inner: Arc::new(Inner {
                 store,
+                secrets,
                 out,
                 networks: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(1),
@@ -244,31 +254,108 @@ impl Core {
                 name: b.name,
                 messages: b.messages,
                 last_time_ms: b.last_time_ms,
+                unread: b.unread,
+                highlights: b.highlights,
             })
             .collect())
     }
+
+    /// Records that a conversation has been read up to `time_ms`, so its unread
+    /// count survives a restart.
+    pub fn mark_read(&self, network: &str, buffer: &str, time_ms: i64) {
+        self.inner
+            .store
+            .mark_read(network.to_owned(), buffer.to_owned(), time_ms);
+    }
+
+    /// Deletes a conversation's history from the log. Returns how many lines
+    /// were removed.
+    pub async fn clear_history(&self, network: &str, buffer: &str) -> Result<usize, String> {
+        self.inner
+            .store
+            .clear(network.to_owned(), buffer.to_owned())
+            .await
+    }
+
+    // ---- remembered passwords --------------------------------------------
+
+    /// The password remembered for a network, if any.
+    pub fn saved_password(&self, id: &str) -> Result<Option<String>, String> {
+        self.inner.secrets.get(id)
+    }
+
+    pub fn remember_password(&self, id: &str, password: &str) -> Result<(), String> {
+        self.inner.secrets.set(id, password)
+    }
+
+    pub fn forget_password(&self, id: &str) -> Result<(), String> {
+        self.inner.secrets.delete(id)
+    }
 }
 
-/// Forwards one connection's events: to the log if they are chat, and to the
-/// interface always.
-async fn pump(
-    inner: Arc<Inner>,
-    id: String,
-    generation: u64,
-    mut events: mpsc::Receiver<Event>,
-) {
-    while let Some(event) = events.recv().await {
+/// Forwards one connection's events: to the log if they are chat or something
+/// that happened in a conversation, and to the interface always.
+async fn pump(inner: Arc<Inner>, id: String, generation: u64, mut events: mpsc::Receiver<Event>) {
+    // Our own nick, for the history lines that are about us. The engine tells us
+    // when we register and whenever we change it.
+    let mut nick = String::new();
+
+    'events: while let Some(event) = events.recv().await {
         let now = now_ms();
+        let mut forgot_password = false;
+        match &event {
+            Event::Registered { nick: n } => nick.clone_from(n),
+            Event::NickChanged { new, own: true, .. } => nick.clone_from(new),
+            // A password that was just refused must not be tried again by the
+            // next automatic connection: repeating a wrong password is how an
+            // account gets locked.
+            Event::AuthFailed(_) => {
+                forgot_password = matches!(inner.secrets.get(&id), Ok(Some(_)));
+                if let Err(e) = inner.secrets.delete(&id) {
+                    let _ = inner.out.send(Envelope {
+                        network: String::new(),
+                        event: UiEvent::Error { code: 0, text: e },
+                    });
+                }
+            }
+            _ => {}
+        }
+
         if let Event::Message(message) = &event {
             inner.store.log(new_message(&id, message, now));
         }
+
+        let mut ui = UiEvent::from_event(&id, &event, now);
+        if let UiEvent::AuthFailed {
+            forgot_password: flag,
+            ..
+        } = &mut ui
+        {
+            *flag = forgot_password;
+        }
         let envelope = Envelope {
             network: id.clone(),
-            event: UiEvent::from_event(&id, &event, now),
+            event: ui,
         };
         if inner.out.send(envelope).is_err() {
             // The window is gone; there is nobody to tell.
             break;
+        }
+
+        // Things that happened in a conversation are history too. They reach the
+        // interface as ordinary lines, the same shape as the ones it reads back
+        // from the log, so a line is never drawn twice in two forms.
+        for line in event_lines(&event, &nick) {
+            inner.store.log(line.to_new_message(&id, now));
+            let envelope = Envelope {
+                network: id.clone(),
+                event: UiEvent::Message {
+                    message: line.to_ui(&id, now),
+                },
+            };
+            if inner.out.send(envelope).is_err() {
+                break 'events;
+            }
         }
     }
 
@@ -289,6 +376,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::secrets::MemorySecrets;
     use rhizome_store::Store;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -340,8 +428,12 @@ mod tests {
     }
 
     fn core() -> (Core, mpsc::UnboundedReceiver<Envelope>) {
+        core_with(Arc::new(MemorySecrets::default()))
+    }
+
+    fn core_with(secrets: Arc<dyn SecretStore>) -> (Core, mpsc::UnboundedReceiver<Envelope>) {
         let store = StoreHost::spawn(Store::open_in_memory().unwrap(), Box::new(|_| {}));
-        Core::new(store)
+        Core::new(store, secrets)
     }
 
     async fn listen() -> (TcpListener, u16) {
@@ -379,7 +471,12 @@ mod tests {
 
     /// Polls the log until `count` messages are in a buffer: writes are
     /// asynchronous, so a read straight after an event may run first.
-    async fn wait_for_log(core: &Core, network: &str, buffer: &str, count: usize) -> Vec<UiMessage> {
+    async fn wait_for_log(
+        core: &Core,
+        network: &str,
+        buffer: &str,
+        count: usize,
+    ) -> Vec<UiMessage> {
         for _ in 0..100 {
             let page = core.scrollback(network, buffer, None, 100).await.unwrap();
             if page.len() >= count {
@@ -411,7 +508,8 @@ mod tests {
             peer.line().await
         });
 
-        core.connect("test", config(port).autojoin(["#rhizome"])).unwrap();
+        core.connect("test", config(port).autojoin(["#rhizome"]))
+            .unwrap();
 
         until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
         until(&mut rx, |e| matches!(e, UiEvent::Joined { .. })).await;
@@ -426,7 +524,9 @@ mod tests {
 
         let message = until(&mut rx, |e| matches!(e, UiEvent::Message { .. })).await;
         assert_eq!(message.network, "test");
-        let UiEvent::Message { message } = message.event else { unreachable!() };
+        let UiEvent::Message { message } = message.event else {
+            unreachable!()
+        };
         assert_eq!(message.buffer, "#rhizome");
         assert!(message.highlight, "it names us");
         assert_eq!(message.plain, "alp: attach the backtrace please");
@@ -439,12 +539,22 @@ mod tests {
         assert_eq!(logged[0].msgid.as_deref(), Some("m1"));
         assert!(logged[0].id.is_some());
 
-        let hits = core.search("backtrace from:bob", Some("test"), false, 10).await.unwrap();
+        let hits = core
+            .search("backtrace from:bob", Some("test"), false, 10)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].snippet.iter().any(|p| p.hit && p.text.to_lowercase() == "backtrace"));
+        assert!(hits[0]
+            .snippet
+            .iter()
+            .any(|p| p.hit && p.text.to_lowercase() == "backtrace"));
 
+        // The context is the conversation around it, which includes our own join.
         let context = core.around(hits[0].message.id.unwrap(), 3).await.unwrap();
-        assert_eq!(context.len(), 1);
+        assert!(context.iter().any(|m| m.plain.contains("backtrace")));
+        assert!(context
+            .iter()
+            .any(|m| m.event.as_ref().is_some_and(|e| e.verb == "join")));
 
         assert_eq!(core.buffers("test").await.unwrap()[0].name, "#rhizome");
 
@@ -467,11 +577,14 @@ mod tests {
         core.connect("test", config(port)).unwrap();
         until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
 
-        core.send_message("test", "#c", "merhaba dünya", MessageKind::Privmsg).unwrap();
+        core.send_message("test", "#c", "merhaba dünya", MessageKind::Privmsg)
+            .unwrap();
 
         // No server echo here, so the engine reports it locally.
         let echoed = until(&mut rx, |e| matches!(e, UiEvent::Message { .. })).await;
-        let UiEvent::Message { message } = echoed.event else { unreachable!() };
+        let UiEvent::Message { message } = echoed.event else {
+            unreachable!()
+        };
         assert!(message.own);
         assert_eq!(message.plain, "merhaba dünya");
 
@@ -525,7 +638,10 @@ mod tests {
     #[tokio::test]
     async fn commands_for_a_network_that_is_not_connected_are_errors() {
         let (core, _rx) = core();
-        assert!(core.send_message("nope", "#c", "x", MessageKind::Privmsg).unwrap_err().contains("not connected"));
+        assert!(core
+            .send_message("nope", "#c", "x", MessageKind::Privmsg)
+            .unwrap_err()
+            .contains("not connected"));
         assert!(core.join("nope", &["#c".into()]).is_err());
         assert!(core.part("nope", "#c", None).is_err());
         assert!(core.set_nick("nope", "x").is_err());
@@ -557,5 +673,234 @@ mod tests {
             _ => unreachable!(),
         }
         core.disconnect("test").unwrap();
+    }
+
+    // ---- history lines, unread counts and clearing ------------------------------
+
+    /// Runs a session in which other people join, talk, change nick, change the
+    /// topic and leave, and returns the core once it has all been seen.
+    async fn busy_channel() -> (Core, mpsc::UnboundedReceiver<Envelope>) {
+        let (core, mut rx) = core();
+        let (listener, port) = listen().await;
+        tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.register().await;
+            peer.expect("JOIN #c").await;
+            peer.send(":alp!~a@h JOIN #c").await;
+            peer.send(":srv 353 alp = #c :alp bob").await;
+            peer.send(":srv 366 alp #c :End").await;
+            peer.send(":carol!c@h JOIN #c").await;
+            peer.send(
+                "@time=2026-09-25T10:00:00.000Z;msgid=a1 :bob!b@h PRIVMSG #c :the needle is here",
+            )
+            .await;
+            peer.send(":bob!b@h NICK robert").await;
+            peer.send(":op!o@h TOPIC #c :new topic").await;
+            peer.send(":op!o@h MODE #c +o carol").await;
+            peer.send(":carol!c@h PART #c :later").await;
+            peer.send(":robert!b@h QUIT :Ping timeout").await;
+            // Hold the connection open.
+            peer.line().await;
+        });
+        core.connect("t", config(port).autojoin(["#c"])).unwrap();
+        // The quit is the last thing the server sends.
+        until(&mut rx, |e| matches!(e, UiEvent::Message { message } if message.event.as_ref().is_some_and(|x| x.verb == "quit"))).await;
+        (core, rx)
+    }
+
+    #[tokio::test]
+    async fn things_that_happen_in_a_channel_become_history_lines_in_order() {
+        let (core, _rx) = busy_channel().await;
+        let logged = loop {
+            let page = core.scrollback("t", "#c", None, 100).await.unwrap();
+            if page.iter().filter(|m| m.event.is_some()).count() >= 7 {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let events: Vec<(String, String, Vec<String>, bool)> = logged
+            .iter()
+            .filter_map(|m| {
+                m.event
+                    .as_ref()
+                    .map(|e| (e.verb.clone(), m.sender.clone(), e.args.clone(), m.own))
+            })
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                ("join".into(), "alp".into(), vec![], true),
+                ("join".into(), "carol".into(), vec![], false),
+                ("nick".into(), "bob".into(), vec!["robert".into()], false),
+                ("topic".into(), "op".into(), vec!["new topic".into()], false),
+                ("mode".into(), "op".into(), vec!["+o carol".into()], false),
+                ("part".into(), "carol".into(), vec!["later".into()], false),
+                (
+                    "quit".into(),
+                    "robert".into(),
+                    vec!["Ping timeout".into()],
+                    false
+                ),
+            ]
+        );
+        // The chat message is among them, as chat.
+        assert!(logged
+            .iter()
+            .any(|m| m.event.is_none() && m.plain == "the needle is here"));
+    }
+
+    #[tokio::test]
+    async fn history_lines_are_not_searchable_and_the_topic_on_joining_is_not_one() {
+        let (core, _rx) = busy_channel().await;
+        // Wait for the log to catch up.
+        for _ in 0..100 {
+            if core.scrollback("t", "#c", None, 100).await.unwrap().len() >= 8 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            core.search("needle", Some("t"), false, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            core.search("topic", Some("t"), false, 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            core.search("Ping timeout", Some("t"), false, 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            core.search("from:op", Some("t"), false, 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn unread_counts_come_from_the_log_and_survive_being_read() {
+        let (core, _rx) = busy_channel().await;
+        let unread = loop {
+            let b = core.buffers("t").await.unwrap();
+            if b.first().is_some_and(|b| b.messages == 1) {
+                break b;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!((unread[0].unread, unread[0].highlights), (1, 0));
+
+        core.mark_read("t", "#c", 1_790_330_400_000);
+        let after = core.buffers("t").await.unwrap();
+        assert_eq!(
+            after[0].unread, 0,
+            "marking read is ordered after the writes it covers"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_history_removes_a_conversation_from_the_log() {
+        let (core, _rx) = busy_channel().await;
+        for _ in 0..100 {
+            if core.scrollback("t", "#c", None, 100).await.unwrap().len() >= 8 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(core.clear_history("t", "#c").await.unwrap() >= 8);
+        assert!(core
+            .scrollback("t", "#c", None, 100)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(core
+            .search("needle", Some("t"), false, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    // ---- remembered passwords -----------------------------------------------------
+
+    #[tokio::test]
+    async fn a_rejected_login_discards_the_remembered_password_and_says_so() {
+        let secrets: Arc<MemorySecrets> = Arc::new(MemorySecrets::default());
+        let (core, mut rx) = core_with(secrets.clone());
+        core.remember_password("t", "old-wrong-password").unwrap();
+        assert_eq!(
+            core.saved_password("t").unwrap().as_deref(),
+            Some("old-wrong-password")
+        );
+
+        let (listener, port) = listen().await;
+        tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.expect("CAP LS 302").await;
+            peer.expect("NICK alp").await;
+            peer.expect("USER alp 0 * :Rhizome").await;
+            peer.send(":srv CAP * LS :sasl=PLAIN").await;
+            let _ = peer.line().await;
+        });
+        // Plaintext, so the engine refuses SASL PLAIN and the login fails at once.
+        core.connect("t", config(port).sasl_plain("alp", "old-wrong-password"))
+            .unwrap();
+
+        let failed = until(&mut rx, |e| matches!(e, UiEvent::AuthFailed { .. })).await;
+        match failed.event {
+            UiEvent::AuthFailed {
+                forgot_password, ..
+            } => assert!(forgot_password),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            core.saved_password("t").unwrap(),
+            None,
+            "it must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_login_with_nothing_remembered_does_not_claim_to_have_forgotten_anything() {
+        let (core, mut rx) = core();
+        let (listener, port) = listen().await;
+        tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.expect("CAP LS 302").await;
+            peer.expect("NICK alp").await;
+            peer.expect("USER alp 0 * :Rhizome").await;
+            peer.send(":srv CAP * LS :sasl=PLAIN").await;
+            let _ = peer.line().await;
+        });
+        core.connect("t", config(port).sasl_plain("alp", "pw"))
+            .unwrap();
+        let failed = until(&mut rx, |e| matches!(e, UiEvent::AuthFailed { .. })).await;
+        assert!(matches!(
+            failed.event,
+            UiEvent::AuthFailed {
+                forgot_password: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn remembered_passwords_are_kept_per_network() {
+        let (core, _rx) = core();
+        core.remember_password("a", "one").unwrap();
+        core.remember_password("b", "two").unwrap();
+        core.forget_password("a").unwrap();
+        assert_eq!(core.saved_password("a").unwrap(), None);
+        assert_eq!(core.saved_password("b").unwrap().as_deref(), Some("two"));
     }
 }

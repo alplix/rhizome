@@ -451,12 +451,16 @@ impl Session {
             331 => {}
             332 => {
                 if let (Some(channel), Some(topic)) = (msg.param(1), msg.param(2)) {
-                    if let Some(ch) = self.channels.get_mut(&self.isupport.casemapping().fold(channel)) {
+                    if let Some(ch) = self
+                        .channels
+                        .get_mut(&self.isupport.casemapping().fold(channel))
+                    {
                         ch.topic = Some(topic.to_owned());
                     }
                     out.events.push(Event::Topic {
                         channel: channel.to_owned(),
                         topic: Some(topic.to_owned()),
+                        by: None,
                     });
                 }
             }
@@ -506,10 +510,7 @@ impl Session {
     fn retry_nick(&mut self, out: &mut Output) {
         self.nick_attempts += 1;
         if self.nick_attempts > MAX_NICK_ATTEMPTS {
-            self.fail(
-                "no free nick could be found".to_owned(),
-                out,
-            );
+            self.fail("no free nick could be found".to_owned(), out);
             return;
         }
         self.nick.push('_');
@@ -529,9 +530,10 @@ impl Session {
     fn sorted_members(&self, mut members: Vec<Member>) -> Vec<Member> {
         let map = self.isupport.casemapping();
         members.sort_by_cached_key(|m| {
-            let rank = m
-                .top_prefix()
-                .map_or_else(|| self.isupport.prefix_rank(' '), |p| self.isupport.prefix_rank(p));
+            let rank = m.top_prefix().map_or_else(
+                || self.isupport.prefix_rank(' '),
+                |p| self.isupport.prefix_rank(p),
+            );
             (rank, map.fold(&m.nick))
         });
         members
@@ -710,6 +712,7 @@ impl Session {
         out.events.push(Event::Topic {
             channel: channel.to_owned(),
             topic,
+            by: msg.source.as_ref().map(|s| s.display_name().to_owned()),
         });
     }
 
@@ -822,7 +825,12 @@ impl Session {
 
         // Text from the server itself (connection notices, MOTD fragments) is
         // not a conversation.
-        let Some(Source::User { nick: sender, user, host }) = msg.source.as_ref() else {
+        let Some(Source::User {
+            nick: sender,
+            user,
+            host,
+        }) = msg.source.as_ref()
+        else {
             out.events.push(Event::Server(body.to_owned()));
             return;
         };
@@ -873,8 +881,8 @@ impl Session {
             sender.clone()
         };
 
-        let highlight = !own
-            && (!is_channel || mentions(&text, &self.nick, self.isupport.casemapping()));
+        let highlight =
+            !own && (!is_channel || mentions(&text, &self.nick, self.isupport.casemapping()));
 
         out.events.push(Event::Message(ChatMessage {
             buffer,
@@ -1051,7 +1059,10 @@ fn ctcp_reply(request: &ctcp::Ctcp) -> Option<String> {
                 .and_then(|p| split::split_utf8(p, 200).into_iter().next());
             Some(ctcp::build("PING", payload))
         }
-        "CLIENTINFO" => Some(ctcp::build("CLIENTINFO", Some("ACTION CLIENTINFO PING VERSION"))),
+        "CLIENTINFO" => Some(ctcp::build(
+            "CLIENTINFO",
+            Some("ACTION CLIENTINFO PING VERSION"),
+        )),
         _ => None,
     }
 }
@@ -1185,7 +1196,10 @@ mod tests {
         assert_eq!(sent(&out), vec!["AUTHENTICATE AGFscABodW50ZXIy"]);
 
         // The account name arrives with 900, then 903 ends the exchange.
-        feed(&mut s, ":srv 900 alp alp!~a@host alp :You are now logged in as alp");
+        feed(
+            &mut s,
+            ":srv 900 alp alp!~a@host alp :You are now logged in as alp",
+        );
         let out = feed(&mut s, ":srv 903 alp :SASL authentication successful");
         assert_eq!(sent(&out), vec!["CAP END"]);
         assert!(!s.is_closed());
@@ -1232,8 +1246,14 @@ mod tests {
     fn a_refused_request_is_retried_one_capability_at_a_time() {
         let mut s = Session::new(cfg());
         s.start();
-        let out = feed(&mut s, ":srv CAP * LS :server-time multi-prefix away-notify");
-        assert_eq!(sent(&out), vec!["CAP REQ :server-time multi-prefix away-notify"]);
+        let out = feed(
+            &mut s,
+            ":srv CAP * LS :server-time multi-prefix away-notify",
+        );
+        assert_eq!(
+            sent(&out),
+            vec!["CAP REQ :server-time multi-prefix away-notify"]
+        );
 
         // The whole request is refused because of one of them.
         let out = feed(
@@ -1359,10 +1379,7 @@ mod tests {
              :are supported by this server",
         );
         feed(&mut s, ":alp!~alp@host JOIN #rhizome");
-        feed(
-            &mut s,
-            ":srv 353 alp = #rhizome :@alp +bob carol ~owner",
-        );
+        feed(&mut s, ":srv 353 alp = #rhizome :@alp +bob carol ~owner");
         feed(&mut s, ":srv 366 alp #rhizome :End of /NAMES list.");
         s
     }
@@ -1423,9 +1440,17 @@ mod tests {
     fn a_member_joining_and_parting_updates_the_list() {
         let mut s = in_channel();
         feed(&mut s, ":dave!d@h JOIN #rhizome");
-        assert!(s.members("#rhizome").unwrap().iter().any(|m| m.nick == "dave"));
+        assert!(s
+            .members("#rhizome")
+            .unwrap()
+            .iter()
+            .any(|m| m.nick == "dave"));
         feed(&mut s, ":dave!d@h PART #rhizome");
-        assert!(!s.members("#rhizome").unwrap().iter().any(|m| m.nick == "dave"));
+        assert!(!s
+            .members("#rhizome")
+            .unwrap()
+            .iter()
+            .any(|m| m.nick == "dave"));
     }
 
     #[test]
@@ -1459,7 +1484,11 @@ mod tests {
                 channels: vec!["#rhizome".into()],
             }]
         );
-        assert!(!s.members("#rhizome").unwrap().iter().any(|m| m.nick == "bob"));
+        assert!(!s
+            .members("#rhizome")
+            .unwrap()
+            .iter()
+            .any(|m| m.nick == "bob"));
     }
 
     #[test]
@@ -1480,7 +1509,10 @@ mod tests {
     fn our_own_nick_change_updates_the_session() {
         let mut s = in_channel();
         let out = feed(&mut s, ":alp!~alp@host NICK alp_away");
-        assert!(matches!(&events(&out)[0], Event::NickChanged { own: true, .. }));
+        assert!(matches!(
+            &events(&out)[0],
+            Event::NickChanged { own: true, .. }
+        ));
         assert_eq!(s.nick(), "alp_away");
         // Our messages are recognised under the new nick.
         let out = feed(&mut s, ":alp_away!~alp@host PRIVMSG #rhizome :hi");
@@ -1521,9 +1553,15 @@ mod tests {
     fn the_topic_is_tracked_from_both_the_reply_and_the_command() {
         let mut s = in_channel();
         let out = feed(&mut s, ":srv 332 alp #rhizome :welcome");
-        assert!(matches!(&events(&out)[0], Event::Topic { topic: Some(t), .. } if t == "welcome"));
+        // The reply on joining names no author, so it is not a change.
+        assert!(
+            matches!(&events(&out)[0], Event::Topic { topic: Some(t), by: None, .. } if t == "welcome")
+        );
         let out = feed(&mut s, ":op!o@h TOPIC #rhizome :new topic");
-        assert!(matches!(&events(&out)[0], Event::Topic { topic: Some(t), .. } if t == "new topic"));
+        assert!(matches!(
+            &events(&out)[0],
+            Event::Topic { topic: Some(t), by: Some(by), .. } if t == "new topic" && by == "op"
+        ));
         let out = feed(&mut s, ":op!o@h TOPIC #rhizome :");
         assert!(matches!(&events(&out)[0], Event::Topic { topic: None, .. }));
     }
@@ -1631,11 +1669,17 @@ mod tests {
     #[test]
     fn a_notice_from_a_user_is_a_notice_and_from_a_server_is_server_text() {
         let mut s = in_channel();
-        let out = feed(&mut s, ":NickServ!NickServ@services. NOTICE alp :You are logged in");
+        let out = feed(
+            &mut s,
+            ":NickServ!NickServ@services. NOTICE alp :You are logged in",
+        );
         assert!(matches!(&events(&out)[0], Event::Message(m)
             if m.kind == MessageKind::Notice && m.buffer == "NickServ"));
 
-        let out = feed(&mut s, ":irc.example.net NOTICE * :*** Looking up your hostname");
+        let out = feed(
+            &mut s,
+            ":irc.example.net NOTICE * :*** Looking up your hostname",
+        );
         assert_eq!(
             events(&out),
             &[Event::Server("*** Looking up your hostname".into())]
@@ -1664,7 +1708,10 @@ mod tests {
     fn a_ctcp_reply_is_never_answered() {
         // Answering replies would let two clients loop forever.
         let mut s = in_channel();
-        let out = feed(&mut s, ":bob!b@h NOTICE alp :\u{1}VERSION SomeClient 1.0\u{1}");
+        let out = feed(
+            &mut s,
+            ":bob!b@h NOTICE alp :\u{1}VERSION SomeClient 1.0\u{1}",
+        );
         assert!(sent(&out).is_empty());
         assert!(matches!(&events(&out)[0], Event::Ctcp { reply: true, .. }));
     }
@@ -1786,7 +1833,11 @@ mod tests {
     #[test]
     fn join_refuses_names_that_are_not_a_single_token() {
         let (mut s, _) = registered(cfg(), "");
-        let out = s.join(&["#ok".to_owned(), "#bad name".to_owned(), "#x\nQUIT".to_owned()]);
+        let out = s.join(&[
+            "#ok".to_owned(),
+            "#bad name".to_owned(),
+            "#x\nQUIT".to_owned(),
+        ]);
         assert_eq!(sent(&out), vec!["JOIN #ok"]);
         assert_eq!(out.events.len(), 2);
     }
@@ -1795,7 +1846,10 @@ mod tests {
     fn raw_lines_are_parsed_and_bad_ones_reported() {
         let (mut s, _) = registered(cfg(), "");
         assert_eq!(sent(&s.raw("WHOIS bob")), vec!["WHOIS bob"]);
-        assert!(matches!(&s.raw("@only-tags").events[0], Event::Error { .. }));
+        assert!(matches!(
+            &s.raw("@only-tags").events[0],
+            Event::Error { .. }
+        ));
     }
 
     #[test]

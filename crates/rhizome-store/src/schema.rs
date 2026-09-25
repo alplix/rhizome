@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// The schema version this build reads and writes.
-pub(crate) const CURRENT_VERSION: i64 = 1;
+pub(crate) const CURRENT_VERSION: i64 = 2;
 
 /// Version 1.
 ///
@@ -69,6 +69,47 @@ CREATE TRIGGER messages_after_delete AFTER DELETE ON messages BEGIN
 END;
 "#;
 
+/// Version 2: events and read markers.
+///
+/// * `buffers.read_ms` is how far the person has read. Existing conversations
+///   start fully read, so upgrading does not turn a whole history into unread
+///   badges.
+/// * Rows of kind 3 (events) are kept out of the search index. The index reads
+///   its content through a view that shows only chat, so its own integrity check
+///   (which compares the index with its content source) still means something.
+///   The triggers that feed it must skip events on insert *and* on delete:
+///   removing a row that was never indexed would corrupt the index.
+const V2: &str = r#"
+ALTER TABLE buffers ADD COLUMN read_ms INTEGER NOT NULL DEFAULT 0;
+
+UPDATE buffers SET read_ms = COALESCE(
+    (SELECT max(time_ms) FROM messages WHERE buffer_id = buffers.id), 0);
+
+DROP TRIGGER messages_after_insert;
+DROP TRIGGER messages_after_delete;
+
+DROP TABLE messages_fts;
+CREATE VIEW messages_indexed AS SELECT id, plain FROM messages WHERE kind < 3;
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    plain,
+    content = 'messages_indexed',
+    content_rowid = 'id',
+    tokenize = "unicode61 remove_diacritics 2 tokenchars '_'"
+);
+INSERT INTO messages_fts (messages_fts) VALUES ('rebuild');
+
+CREATE TRIGGER messages_after_insert AFTER INSERT ON messages
+WHEN new.kind < 3 BEGIN
+    INSERT INTO messages_fts (rowid, plain) VALUES (new.id, new.plain);
+END;
+
+CREATE TRIGGER messages_after_delete AFTER DELETE ON messages
+WHEN old.kind < 3 BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, plain)
+        VALUES ('delete', old.id, old.plain);
+END;
+"#;
+
 /// Brings a freshly opened connection up to date.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -83,6 +124,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         match version {
             0 => tx.execute_batch(V1)?,
+            1 => tx.execute_batch(V2)?,
             other => unreachable!("no migration defined from schema version {other}"),
         }
         // `PRAGMA` does not take bound parameters, and the value is a constant

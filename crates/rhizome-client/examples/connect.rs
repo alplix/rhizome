@@ -96,7 +96,10 @@ fn show(event: &Event) {
         Event::Registered { nick } => println!("-- registered as {nick}"),
         Event::Network(name) => println!("-- network: {name}"),
         Event::Disconnected { reason, retry_in } => match retry_in {
-            Some(d) => println!("-- disconnected ({reason}); retrying in {:.1}s", d.as_secs_f32()),
+            Some(d) => println!(
+                "-- disconnected ({reason}); retrying in {:.1}s",
+                d.as_secs_f32()
+            ),
             None => println!("-- disconnected ({reason}); giving up"),
         },
         Event::Message(m) => {
@@ -113,25 +116,43 @@ fn show(event: &Event) {
         Event::Ctcp { from, command, .. } => println!("-- CTCP {command} from {from}"),
         Event::Joined { channel } => println!("-- you joined {channel}"),
         Event::Parted { channel, .. } => println!("-- you left {channel}"),
-        Event::Kicked { channel, by, reason } => {
-            println!("-- kicked from {channel} by {by} ({})", reason.as_deref().unwrap_or(""))
+        Event::Kicked {
+            channel,
+            by,
+            reason,
+        } => {
+            println!(
+                "-- kicked from {channel} by {by} ({})",
+                reason.as_deref().unwrap_or("")
+            )
         }
         Event::MemberJoined { channel, nick, .. } => println!("-- {nick} joined {channel}"),
         Event::MemberParted { channel, nick, .. } => println!("-- {nick} left {channel}"),
-        Event::MemberKicked { channel, nick, by, .. } => {
+        Event::MemberKicked {
+            channel, nick, by, ..
+        } => {
             println!("-- {nick} was kicked from {channel} by {by}")
         }
         Event::MemberQuit { nick, reason, .. } => {
             println!("-- {nick} quit ({})", reason.as_deref().unwrap_or(""))
         }
         Event::NickChanged { old, new, .. } => println!("-- {old} is now {new}"),
-        Event::Topic { channel, topic } => {
-            println!("-- topic of {channel}: {}", topic.as_deref().map_or_else(String::new, format::strip))
+        Event::Topic { channel, topic, .. } => {
+            println!(
+                "-- topic of {channel}: {}",
+                topic.as_deref().map_or_else(String::new, format::strip)
+            )
         }
         Event::Names { channel, members } => {
             let list: Vec<String> = members
                 .iter()
-                .map(|m| format!("{}{}", m.top_prefix().map_or(String::new(), String::from), m.nick))
+                .map(|m| {
+                    format!(
+                        "{}{}",
+                        m.top_prefix().map_or(String::new(), String::from),
+                        m.nick
+                    )
+                })
                 .collect();
             println!("-- {channel}: {} members: {}", list.len(), list.join(" "));
         }
@@ -174,7 +195,11 @@ fn handle_input(line: &str, handle: &Handle, current: &mut Option<String>) -> bo
             handle.join(&channels)
         }
         "part" | "leave" => {
-            let target = if rest.is_empty() { current.clone() } else { Some(rest.to_owned()) };
+            let target = if rest.is_empty() {
+                current.clone()
+            } else {
+                Some(rest.to_owned())
+            };
             match target {
                 Some(channel) => handle.part(&channel, None),
                 None => note("!! part which channel?"),

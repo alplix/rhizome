@@ -68,7 +68,9 @@ pub enum Event {
     /// way.
     Connected,
     /// Registration finished; the connection is usable.
-    Registered { nick: String },
+    Registered {
+        nick: String,
+    },
     /// The server told us the network's name.
     Network(String),
     /// The connection ended. `retry_in` is `Some` when a reconnect is
@@ -92,7 +94,9 @@ pub enum Event {
     },
 
     /// We joined a channel.
-    Joined { channel: String },
+    Joined {
+        channel: String,
+    },
     /// We left a channel.
     Parted {
         channel: String,
@@ -135,9 +139,14 @@ pub enum Event {
         /// Whether the nick that changed was ours.
         own: bool,
     },
+    /// A channel's topic. `by` is who changed it, and is present only for a
+    /// change made while we watched. The reply the server sends when we join
+    /// carries no author, so a UI can show the topic without announcing a
+    /// change that did not happen.
     Topic {
         channel: String,
         topic: Option<String>,
+        by: Option<String>,
     },
     /// The full member list of a channel, ordered by privilege then name.
     Names {
@@ -154,7 +163,10 @@ pub enum Event {
 
     /// The server rejected something. `code` is the numeric reply, or `0` for
     /// a problem detected locally.
-    Error { code: u16, text: String },
+    Error {
+        code: u16,
+        text: String,
+    },
     /// The server sent `ERROR`, which precedes it closing the connection.
     ServerError(String),
     /// Authentication failed. The client does not retry: repeating a wrong

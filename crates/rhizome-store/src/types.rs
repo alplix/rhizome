@@ -8,12 +8,18 @@ pub const MARK_START: char = '\u{E000}';
 /// See [`MARK_START`].
 pub const MARK_END: char = '\u{E001}';
 
-/// How a message was sent.
+/// What a logged line is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Privmsg,
     Notice,
     Action,
+    /// Something that happened in the conversation rather than something said
+    /// in it: a join, a part, a topic change. The store keeps it so the
+    /// scrollback reads as it did, but treats it differently from chat: it is
+    /// never searched, never indexed, and never counts as unread. Its `text` is
+    /// opaque to the store; the caller decides how to encode and show it.
+    Event,
 }
 
 impl Kind {
@@ -22,6 +28,7 @@ impl Kind {
             Kind::Privmsg => 0,
             Kind::Notice => 1,
             Kind::Action => 2,
+            Kind::Event => EVENT_KIND,
         }
     }
 
@@ -31,10 +38,22 @@ impl Kind {
         match value {
             1 => Kind::Notice,
             2 => Kind::Action,
+            EVENT_KIND => Kind::Event,
             _ => Kind::Privmsg,
         }
     }
+
+    /// Whether this is something a person wrote, as opposed to an [`Event`].
+    ///
+    /// [`Event`]: Kind::Event
+    pub fn is_chat(self) -> bool {
+        self != Kind::Event
+    }
 }
+
+/// The database value for [`Kind::Event`]. Every kind below it is chat; the
+/// search index and the unread counts rely on that ordering (`kind < 3`).
+pub(crate) const EVENT_KIND: i64 = 3;
 
 /// A message to record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,14 +121,20 @@ pub struct Cursor {
     pub id: i64,
 }
 
-/// A conversation that has messages in the log.
+/// A conversation that is in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BufferInfo {
     pub network: String,
     pub name: String,
+    /// How many chat messages it holds (events are not counted).
     pub messages: i64,
-    /// The time of the newest message, if any.
+    /// The time of the newest chat message, if any.
     pub last_time_ms: Option<i64>,
+    /// Chat messages from other people since it was last marked read.
+    pub unread: i64,
+    /// How many of those [`unread`](BufferInfo::unread) messages were flagged
+    /// as needing attention.
+    pub highlights: i64,
 }
 
 /// How to order search results.

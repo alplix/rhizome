@@ -229,12 +229,12 @@ impl Store {
                      FROM messages_fts
                      JOIN messages m ON m.id = messages_fts.rowid
                      JOIN buffers b ON b.id = m.buffer_id
-                     WHERE messages_fts MATCH ?"
+                     WHERE messages_fts MATCH ? AND m.kind < 3"
                 )
             }
             None => format!(
                 "SELECT {MESSAGE_COLUMNS}, NULL FROM messages m
-                 JOIN buffers b ON b.id = m.buffer_id WHERE 1 = 1"
+                 JOIN buffers b ON b.id = m.buffer_id WHERE m.kind < 3"
             ),
         };
 
@@ -261,11 +261,12 @@ impl Store {
         args.push(Box::new(clamp_limit(options.limit)));
 
         let mut statement = self.conn.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(args.iter().map(|a| a.as_ref())), |row| {
-            let message = read_message(row)?;
-            let snippet: Option<String> = row.get(10)?;
-            Ok((message, snippet))
-        })?;
+        let rows =
+            statement.query_map(params_from_iter(args.iter().map(|a| a.as_ref())), |row| {
+                let message = read_message(row)?;
+                let snippet: Option<String> = row.get(10)?;
+                Ok((message, snippet))
+            })?;
 
         let mut hits = Vec::new();
         for row in rows {
@@ -284,12 +285,25 @@ impl Store {
     /// The conversations on a network that have messages, most recently active
     /// first.
     pub fn buffers(&self, network: &str) -> Result<Vec<BufferInfo>> {
+        // The unread counts are range scans over the (buffer, time) index from
+        // the read marker onward, so they stay fast however long the history is.
+        // Events are excluded throughout: they are not conversation.
         let mut statement = self.conn.prepare(
-            "SELECT b.network, b.name, count(m.id), max(m.time_ms)
-             FROM buffers b LEFT JOIN messages m ON m.buffer_id = b.id
+            "SELECT b.network, b.name,
+                    (SELECT count(*) FROM messages m
+                      WHERE m.buffer_id = b.id AND m.kind < 3),
+                    (SELECT m.time_ms FROM messages m
+                      WHERE m.buffer_id = b.id AND m.kind < 3
+                      ORDER BY m.time_ms DESC LIMIT 1) AS last,
+                    (SELECT count(*) FROM messages m
+                      WHERE m.buffer_id = b.id AND m.time_ms > b.read_ms
+                        AND m.kind < 3 AND m.own = 0),
+                    (SELECT count(*) FROM messages m
+                      WHERE m.buffer_id = b.id AND m.time_ms > b.read_ms
+                        AND m.kind < 3 AND m.own = 0 AND m.highlight = 1)
+             FROM buffers b
              WHERE b.network = ?1
-             GROUP BY b.id
-             ORDER BY max(m.time_ms) DESC, b.name",
+             ORDER BY last DESC, b.name",
         )?;
         let rows = statement.query_map(params![network], |r| {
             Ok(BufferInfo {
@@ -297,9 +311,24 @@ impl Store {
                 name: r.get(1)?,
                 messages: r.get(2)?,
                 last_time_ms: r.get(3)?,
+                unread: r.get(4)?,
+                highlights: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Records that a conversation has been read up to `time_ms`.
+    ///
+    /// The marker only moves forward: marking an older time (a stale window
+    /// reporting late) never makes read messages unread again. Marking a
+    /// conversation that does not exist does nothing.
+    pub fn mark_read(&mut self, network: &str, buffer: &str, time_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE buffers SET read_ms = max(read_ms, ?3) WHERE network = ?1 AND key = ?2",
+            params![network, buffer_key(buffer), time_ms],
+        )?;
+        Ok(())
     }
 
     /// The names of the networks that have anything logged.
@@ -361,22 +390,45 @@ fn read_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
 /// Finds or creates the buffer, keeping its display name current: a channel
 /// that was first seen as `#rhizome` and later as `#Rhizome` is one buffer,
 /// shown the way it was last written.
-fn buffer_id(conn: &Connection, network: &str, name: &str) -> rusqlite::Result<i64> {
+///
+/// A conversation created by a chat message starts with everything *before*
+/// that message read, so the message itself is the first unread one. That is
+/// what a new private message should look like.
+///
+/// One created by an event (we joined a channel) has nothing read, so the first
+/// chat message after it counts. Anchoring it to the event's time instead would
+/// be wrong whenever the server's clock runs behind ours: real messages would
+/// carry earlier timestamps than the marker and never count as unread.
+fn buffer_id(
+    conn: &Connection,
+    network: &str,
+    name: &str,
+    first_time_ms: i64,
+) -> rusqlite::Result<i64> {
     conn.prepare_cached(
-        "INSERT INTO buffers (network, key, name) VALUES (?1, ?2, ?3)
+        "INSERT INTO buffers (network, key, name, read_ms) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (network, key) DO UPDATE SET name = excluded.name
          RETURNING id",
     )?
-    .query_row(params![network, buffer_key(name), name], |r| r.get(0))
+    .query_row(
+        params![
+            network,
+            buffer_key(name),
+            name,
+            first_time_ms.saturating_sub(1)
+        ],
+        |r| r.get(0),
+    )
 }
 
 fn insert(conn: &Connection, m: &NewMessage) -> rusqlite::Result<Option<i64>> {
-    let buffer_id = buffer_id(conn, &m.network, &m.buffer)?;
     let time_ms = m
         .server_time
         .as_deref()
         .and_then(parse_server_time)
         .unwrap_or(m.received_ms);
+    let anchor = if m.kind.is_chat() { time_ms } else { 1 };
+    let buffer_id = buffer_id(conn, &m.network, &m.buffer, anchor)?;
     // An empty id is no id: treating it as one would make every such message
     // in a buffer a duplicate of the first.
     let msgid = m.msgid.as_deref().filter(|id| !id.is_empty());
@@ -393,7 +445,12 @@ fn insert(conn: &Connection, m: &NewMessage) -> rusqlite::Result<Option<i64>> {
             m.sender,
             m.kind.to_db(),
             m.text,
-            format::strip(&m.text),
+            // Events are not indexed, so their searchable copy stays empty.
+            if m.kind.is_chat() {
+                format::strip(&m.text)
+            } else {
+                String::new()
+            },
             m.own,
             m.highlight,
             msgid,

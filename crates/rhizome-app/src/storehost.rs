@@ -40,6 +40,16 @@ enum Request {
         network: String,
         reply: Reply<Vec<BufferInfo>>,
     },
+    MarkRead {
+        network: String,
+        buffer: String,
+        time_ms: i64,
+    },
+    Clear {
+        network: String,
+        buffer: String,
+        reply: Reply<usize>,
+    },
 }
 
 /// A handle to the store thread. Cloning is cheap; the thread exits when the
@@ -75,6 +85,26 @@ impl StoreHost {
         // If the thread has gone, there is nowhere to record to; the error sink
         // already reported whatever ended it.
         let _ = self.tx.send(Request::Log(message));
+    }
+
+    /// Records that a conversation has been read up to `time_ms`. Never blocks;
+    /// it takes effect after everything queued before it.
+    pub fn mark_read(&self, network: String, buffer: String, time_ms: i64) {
+        let _ = self.tx.send(Request::MarkRead {
+            network,
+            buffer,
+            time_ms,
+        });
+    }
+
+    /// Deletes a conversation's whole history. Returns how many lines went.
+    pub async fn clear(&self, network: String, buffer: String) -> Result<usize, String> {
+        self.ask(|reply| Request::Clear {
+            network,
+            buffer,
+            reply,
+        })
+        .await
     }
 
     async fn ask<T>(&self, build: impl FnOnce(Reply<T>) -> Request) -> Result<T, String> {
@@ -118,7 +148,8 @@ impl StoreHost {
     }
 
     pub async fn around(&self, id: i64, radius: usize) -> Result<Vec<StoredMessage>, String> {
-        self.ask(|reply| Request::Around { id, radius, reply }).await
+        self.ask(|reply| Request::Around { id, radius, reply })
+            .await
     }
 
     pub async fn buffers(&self, network: String) -> Result<Vec<BufferInfo>, String> {
@@ -136,7 +167,10 @@ fn flush(store: &mut Store, batch: &mut Vec<NewMessage>, on_error: &ErrorSink) {
         return;
     }
     if let Err(e) = store.log_messages(batch) {
-        on_error(format!("could not save {} message(s) to the log: {e}", batch.len()));
+        on_error(format!(
+            "could not save {} message(s) to the log: {e}",
+            batch.len()
+        ));
     }
     batch.clear();
 }
@@ -178,6 +212,20 @@ fn run(mut store: Store, rx: mpsc::Receiver<Request>, on_error: ErrorSink) {
                         Request::Buffers { network, reply } => {
                             answer(reply, store.buffers(&network))
                         }
+                        Request::MarkRead {
+                            network,
+                            buffer,
+                            time_ms,
+                        } => {
+                            if let Err(e) = store.mark_read(&network, &buffer, time_ms) {
+                                on_error(format!("could not save what you have read: {e}"));
+                            }
+                        }
+                        Request::Clear {
+                            network,
+                            buffer,
+                            reply,
+                        } => answer(reply, store.delete_buffer(&network, &buffer)),
                         Request::Log(_) => unreachable!("handled above"),
                     }
                     next = rx.try_recv().ok();
@@ -226,7 +274,10 @@ mod tests {
             host.log(message(&format!("line {i}"), &format!("id{i}"), i));
         }
         // No pause: the read must not overtake the writes ahead of it.
-        let page = host.scrollback("net".into(), "#c".into(), None, 1000).await.unwrap();
+        let page = host
+            .scrollback("net".into(), "#c".into(), None, 1000)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 200);
         assert_eq!(page[0].text, "line 0");
         assert_eq!(page[199].text, "line 199");
@@ -237,7 +288,10 @@ mod tests {
         let (host, _) = host();
         host.log(message("the backtrace is here", "a", 1));
         host.log(message("unrelated", "b", 2));
-        let hits = host.search("backtrace".into(), SearchOptions::default()).await.unwrap();
+        let hits = host
+            .search("backtrace".into(), SearchOptions::default())
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         let around = host.around(hits[0].message.id, 5).await.unwrap();
         assert_eq!(around.len(), 2);
@@ -251,7 +305,10 @@ mod tests {
         for _ in 0..5 {
             host.log(message("same", "one-id", 1));
         }
-        let page = host.scrollback("net".into(), "#c".into(), None, 10).await.unwrap();
+        let page = host
+            .scrollback("net".into(), "#c".into(), None, 10)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 1);
     }
 
@@ -291,8 +348,16 @@ mod tests {
         host.buffers("net".into()).await.unwrap();
 
         let reported = errors.lock().unwrap().clone();
-        assert_eq!(reported.len(), 1, "the failure must reach the sink: {reported:?}");
-        assert!(reported[0].contains("could not save 1 message"), "{}", reported[0]);
+        assert_eq!(
+            reported.len(),
+            1,
+            "the failure must reach the sink: {reported:?}"
+        );
+        assert!(
+            reported[0].contains("could not save 1 message"),
+            "{}",
+            reported[0]
+        );
 
         drop(host);
         // Give the store thread a moment to release the file before removing it.
@@ -306,5 +371,31 @@ mod tests {
         let other = host.clone();
         drop(host);
         assert!(other.buffers("net".into()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn marking_read_is_ordered_after_the_messages_it_covers() {
+        let (host, _) = host();
+        for i in 0..50 {
+            host.log(message(&format!("m{i}"), &format!("id{i}"), 1000 + i));
+        }
+        // Queued straight after the writes, with no pause: it must see all of them.
+        host.mark_read("net".into(), "#c".into(), 1049);
+        let buffers = host.buffers("net".into()).await.unwrap();
+        assert_eq!((buffers[0].messages, buffers[0].unread), (50, 0));
+    }
+
+    #[tokio::test]
+    async fn clearing_a_conversation_removes_it_and_reports_how_much() {
+        let (host, _) = host();
+        host.log(message("one", "a", 1));
+        host.log(message("two", "b", 2));
+        assert_eq!(host.clear("net".into(), "#c".into()).await.unwrap(), 2);
+        assert!(host
+            .scrollback("net".into(), "#c".into(), None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(host.clear("net".into(), "#c".into()).await.unwrap(), 0);
     }
 }

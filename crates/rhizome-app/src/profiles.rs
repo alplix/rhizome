@@ -8,6 +8,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::fsutil::write_atomic;
+
 use rhizome_client::Config;
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +35,10 @@ pub struct Profile {
     /// of the profile.
     #[serde(default)]
     pub sasl_account: Option<String>,
+    /// Connect to this network when the application starts. A network that
+    /// needs a password only does so if one has been saved.
+    #[serde(default)]
+    pub autoconnect: bool,
 }
 
 fn has_bad_chars(s: &str) -> bool {
@@ -50,9 +56,15 @@ impl Profile {
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
         if !id_ok {
-            return Err("the id must be 1-32 characters: lowercase letters, digits, '-' or '_'".into());
+            return Err(
+                "the id must be 1-32 characters: lowercase letters, digits, '-' or '_'".into(),
+            );
         }
-        if self.host.is_empty() || self.host.len() > 253 || has_bad_chars(&self.host) || self.host.contains('/') {
+        if self.host.is_empty()
+            || self.host.len() > 253
+            || has_bad_chars(&self.host)
+            || self.host.contains('/')
+        {
             return Err("the server address is not valid".into());
         }
         if self.port == 0 {
@@ -66,7 +78,11 @@ impl Profile {
         {
             return Err("the nick is not valid (no spaces, and it cannot start with a digit, '#', ':' or '-')".into());
         }
-        if self.username.is_empty() || self.username.len() > 64 || has_bad_chars(&self.username) || self.username.contains('@') {
+        if self.username.is_empty()
+            || self.username.len() > 64
+            || has_bad_chars(&self.username)
+            || self.username.contains('@')
+        {
             return Err("the username is not valid".into());
         }
         if self.realname.len() > 200 || self.realname.chars().any(char::is_control) {
@@ -158,17 +174,7 @@ impl ProfileStore {
             profiles: profiles.to_vec(),
         };
         let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-        }
-        // Write beside the file and rename over it, so a crash mid-write leaves
-        // the old contents rather than a half-written file.
-        let mut temp = self.path.clone().into_os_string();
-        temp.push(".tmp");
-        let temp = PathBuf::from(temp);
-        fs::write(&temp, json).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
-        fs::rename(&temp, &self.path)
-            .map_err(|e| format!("could not replace {}: {e}", self.path.display()))
+        write_atomic(&self.path, &json)
     }
 
     /// Adds a profile or replaces the one with the same id.
@@ -205,13 +211,15 @@ mod tests {
             realname: "Alp".into(),
             channels: vec!["#rhizome".into()],
             sasl_account: None,
+            autoconnect: false,
         }
     }
 
     struct Temp(PathBuf);
     impl Temp {
         fn new(name: &str) -> Temp {
-            let dir = std::env::temp_dir().join(format!("rhizome-app-test-{}-{name}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("rhizome-app-test-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             Temp(dir)
         }
@@ -230,21 +238,111 @@ mod tests {
     #[test]
     fn bad_fields_are_rejected_with_a_reason() {
         let cases: Vec<(&str, Profile)> = vec![
-            ("empty id", Profile { id: "".into(), ..profile() }),
-            ("uppercase id", Profile { id: "Libera".into(), ..profile() }),
-            ("spacey id", Profile { id: "my net".into(), ..profile() }),
-            ("no host", Profile { host: "".into(), ..profile() }),
-            ("host with a path", Profile { host: "irc.example/x".into(), ..profile() }),
-            ("host with a space", Profile { host: "irc example".into(), ..profile() }),
-            ("port zero", Profile { port: 0, ..profile() }),
-            ("nick with a space", Profile { nick: "a b".into(), ..profile() }),
-            ("nick starting with a digit", Profile { nick: "1abc".into(), ..profile() }),
-            ("nick that looks like a channel", Profile { nick: "#chan".into(), ..profile() }),
-            ("nick with a line break", Profile { nick: "a\nQUIT".into(), ..profile() }),
-            ("username with @", Profile { username: "a@b".into(), ..profile() }),
-            ("channel with a comma", Profile { channels: vec!["#a,#b".into()], ..profile() }),
-            ("channel with a line break", Profile { channels: vec!["#a\nQUIT".into()], ..profile() }),
-            ("empty sasl account", Profile { sasl_account: Some("".into()), ..profile() }),
+            (
+                "empty id",
+                Profile {
+                    id: "".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "uppercase id",
+                Profile {
+                    id: "Libera".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "spacey id",
+                Profile {
+                    id: "my net".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "no host",
+                Profile {
+                    host: "".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "host with a path",
+                Profile {
+                    host: "irc.example/x".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "host with a space",
+                Profile {
+                    host: "irc example".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "port zero",
+                Profile {
+                    port: 0,
+                    ..profile()
+                },
+            ),
+            (
+                "nick with a space",
+                Profile {
+                    nick: "a b".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "nick starting with a digit",
+                Profile {
+                    nick: "1abc".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "nick that looks like a channel",
+                Profile {
+                    nick: "#chan".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "nick with a line break",
+                Profile {
+                    nick: "a\nQUIT".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "username with @",
+                Profile {
+                    username: "a@b".into(),
+                    ..profile()
+                },
+            ),
+            (
+                "channel with a comma",
+                Profile {
+                    channels: vec!["#a,#b".into()],
+                    ..profile()
+                },
+            ),
+            (
+                "channel with a line break",
+                Profile {
+                    channels: vec!["#a\nQUIT".into()],
+                    ..profile()
+                },
+            ),
+            (
+                "empty sasl account",
+                Profile {
+                    sasl_account: Some("".into()),
+                    ..profile()
+                },
+            ),
         ];
         for (label, p) in cases {
             assert!(p.validate().is_err(), "{label} should be rejected");
@@ -287,12 +385,19 @@ mod tests {
         renamed.nick = "alp2".into();
         store.upsert(renamed).unwrap();
         store
-            .upsert(Profile { id: "oftc".into(), host: "irc.oftc.net".into(), ..profile() })
+            .upsert(Profile {
+                id: "oftc".into(),
+                host: "irc.oftc.net".into(),
+                ..profile()
+            })
             .unwrap();
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].nick, "alp2", "same id replaces rather than duplicates");
+        assert_eq!(
+            loaded[0].nick, "alp2",
+            "same id replaces rather than duplicates"
+        );
 
         store.remove("libera").unwrap();
         assert_eq!(store.load().unwrap().len(), 1);
@@ -314,7 +419,12 @@ mod tests {
     fn an_invalid_profile_is_not_saved() {
         let t = Temp::new("invalid");
         let store = ProfileStore::new(t.0.join("profiles.json"));
-        assert!(store.upsert(Profile { nick: "a b".into(), ..profile() }).is_err());
+        assert!(store
+            .upsert(Profile {
+                nick: "a b".into(),
+                ..profile()
+            })
+            .is_err());
         assert_eq!(store.load().unwrap(), vec![]);
     }
 
@@ -326,7 +436,10 @@ mod tests {
         fs::write(&path, "{ this is not json").unwrap();
         let store = ProfileStore::new(&path);
 
-        assert!(store.load().unwrap_err().contains("not a valid profile file"));
+        assert!(store
+            .load()
+            .unwrap_err()
+            .contains("not a valid profile file"));
         // A save must refuse, not replace what the person may want to recover.
         assert!(store.upsert(profile()).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ this is not json");
@@ -338,7 +451,10 @@ mod tests {
         fs::create_dir_all(&t.0).unwrap();
         let path = t.0.join("profiles.json");
         fs::write(&path, r#"{"version": 99, "profiles": []}"#).unwrap();
-        assert!(ProfileStore::new(&path).load().unwrap_err().contains("newer"));
+        assert!(ProfileStore::new(&path)
+            .load()
+            .unwrap_err()
+            .contains("newer"));
     }
 
     #[test]
@@ -351,5 +467,29 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["profiles.json"]);
+    }
+
+    #[test]
+    fn autoconnect_is_saved_and_a_file_from_before_it_existed_still_loads() {
+        let t = Temp::new("autoconnect");
+        let store = ProfileStore::new(t.0.join("profiles.json"));
+        store
+            .upsert(Profile {
+                autoconnect: true,
+                ..profile()
+            })
+            .unwrap();
+        assert!(store.load().unwrap()[0].autoconnect);
+
+        // A file written before the field existed has none, which means off.
+        fs::write(
+            store.path(),
+            r#"{"version":1,"profiles":[{"id":"old","name":"Old","host":"h","port":6667,"tls":false,
+               "nick":"n","username":"u","realname":"r","channels":[],"sasl_account":null}]}"#,
+        )
+        .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].autoconnect);
     }
 }

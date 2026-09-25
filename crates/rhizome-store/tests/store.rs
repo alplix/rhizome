@@ -101,7 +101,12 @@ fn messages_in_the_same_millisecond_keep_the_order_they_were_stored() {
 #[test]
 fn every_field_survives_the_round_trip() {
     let mut s = store();
-    let mut m = msg("#Rhizome", "Bob", "\u{2}bold\u{2} text ş", 1_758_794_400_123);
+    let mut m = msg(
+        "#Rhizome",
+        "Bob",
+        "\u{2}bold\u{2} text ş",
+        1_758_794_400_123,
+    );
     m.kind = Kind::Action;
     m.own = true;
     m.highlight = true;
@@ -115,7 +120,10 @@ fn every_field_survives_the_round_trip() {
     assert_eq!(got.buffer, "#Rhizome", "the display name keeps its case");
     assert_eq!(got.sender, "Bob");
     assert_eq!(got.kind, Kind::Action);
-    assert_eq!(got.text, "\u{2}bold\u{2} text ş", "formatting codes are kept");
+    assert_eq!(
+        got.text, "\u{2}bold\u{2} text ş",
+        "formatting codes are kept"
+    );
     assert_eq!(got.time_ms, 1_758_794_400_123);
     assert!(got.own && got.highlight);
     assert_eq!(got.msgid.as_deref(), Some("abc123"));
@@ -152,7 +160,8 @@ fn the_server_time_is_used_and_arrival_time_is_the_fallback() {
 fn paging_by_cursor_visits_every_message_exactly_once() {
     let mut s = store();
     for i in 0..25 {
-        s.log_message(&msg("#c", "a", &format!("m{i:02}"), 1000 + i)).unwrap();
+        s.log_message(&msg("#c", "a", &format!("m{i:02}"), 1000 + i))
+            .unwrap();
     }
 
     let mut collected: Vec<String> = Vec::new();
@@ -161,7 +170,10 @@ fn paging_by_cursor_visits_every_message_exactly_once() {
     // fails to advance would otherwise loop forever and hang the suite instead
     // of failing it.
     for round in 0.. {
-        assert!(round < 10, "paging did not terminate; collected {collected:?}");
+        assert!(
+            round < 10,
+            "paging did not terminate; collected {collected:?}"
+        );
         let page = s.scrollback(NET, "#c", before, 10).unwrap();
         if page.is_empty() {
             break;
@@ -182,11 +194,14 @@ fn paging_by_cursor_visits_every_message_exactly_once() {
 fn paging_across_messages_sharing_a_millisecond_does_not_skip_or_repeat() {
     let mut s = store();
     for i in 0..9 {
-        s.log_message(&msg("#c", "a", &format!("m{i}"), 7000)).unwrap();
+        s.log_message(&msg("#c", "a", &format!("m{i}"), 7000))
+            .unwrap();
     }
     let newest = s.scrollback(NET, "#c", None, 4).unwrap();
     assert_eq!(texts(&newest), vec!["m5", "m6", "m7", "m8"]);
-    let older = s.scrollback(NET, "#c", Some(newest[0].cursor()), 4).unwrap();
+    let older = s
+        .scrollback(NET, "#c", Some(newest[0].cursor()), 4)
+        .unwrap();
     assert_eq!(texts(&older), vec!["m1", "m2", "m3", "m4"]);
     let oldest = s.scrollback(NET, "#c", Some(older[0].cursor()), 4).unwrap();
     assert_eq!(texts(&oldest), vec!["m0"]);
@@ -196,13 +211,15 @@ fn paging_across_messages_sharing_a_millisecond_does_not_skip_or_repeat() {
 fn new_messages_arriving_between_pages_do_not_shift_them() {
     let mut s = store();
     for i in 0..10 {
-        s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i)).unwrap();
+        s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i))
+            .unwrap();
     }
     let first = s.scrollback(NET, "#c", None, 5).unwrap();
     // Traffic arrives while the user is reading. With offset paging this would
     // push everything down and repeat messages.
     for i in 10..15 {
-        s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i)).unwrap();
+        s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i))
+            .unwrap();
     }
     let second = s.scrollback(NET, "#c", Some(first[0].cursor()), 5).unwrap();
     assert_eq!(texts(&second), vec!["m0", "m1", "m2", "m3", "m4"]);
@@ -221,7 +238,10 @@ fn a_repeated_msgid_in_the_same_buffer_is_stored_once() {
     let mut s = store();
     let m = with_id(msg("#c", "a", "hello", 1000), "id-1");
     assert!(s.log_message(&m).unwrap().is_some());
-    assert!(s.log_message(&m).unwrap().is_none(), "the replay is ignored");
+    assert!(
+        s.log_message(&m).unwrap().is_none(),
+        "the replay is ignored"
+    );
     assert_eq!(s.message_count().unwrap(), 1);
 }
 
@@ -229,7 +249,12 @@ fn a_repeated_msgid_in_the_same_buffer_is_stored_once() {
 fn replaying_overlapping_history_adds_only_what_is_new() {
     let mut s = store();
     let history: Vec<NewMessage> = (0..10)
-        .map(|i| with_id(msg("#c", "a", &format!("m{i}"), 1000 + i), &format!("id-{i}")))
+        .map(|i| {
+            with_id(
+                msg("#c", "a", &format!("m{i}"), 1000 + i),
+                &format!("id-{i}"),
+            )
+        })
         .collect();
     assert_eq!(s.log_messages(&history[..6]).unwrap(), 6);
     // A reconnect fetches a window overlapping the first by three messages.
@@ -241,7 +266,8 @@ fn replaying_overlapping_history_adds_only_what_is_new() {
 #[test]
 fn the_same_msgid_in_different_buffers_is_not_a_duplicate() {
     let mut s = store();
-    s.log_message(&with_id(msg("#a", "x", "one", 1000), "same")).unwrap();
+    s.log_message(&with_id(msg("#a", "x", "one", 1000), "same"))
+        .unwrap();
     assert!(s
         .log_message(&with_id(msg("#b", "x", "two", 1000), "same"))
         .unwrap()
@@ -258,7 +284,8 @@ fn messages_without_an_id_are_never_treated_as_duplicates() {
 
     // An empty id is no id, not a shared id.
     for _ in 0..2 {
-        s.log_message(&with_id(msg("#c", "a", "empty id", 1000), "")).unwrap();
+        s.log_message(&with_id(msg("#c", "a", "empty id", 1000), ""))
+            .unwrap();
     }
     assert_eq!(s.message_count().unwrap(), 5);
 }
@@ -281,8 +308,10 @@ fn buffer_names_match_case_insensitively_and_show_the_latest_spelling() {
 #[test]
 fn rfc1459_bracket_folding_applies_to_private_message_buffers() {
     let mut s = store();
-    s.log_message(&msg("Dave[away]", "Dave[away]", "hi", 1000)).unwrap();
-    s.log_message(&msg("dave{away}", "dave{away}", "back", 2000)).unwrap();
+    s.log_message(&msg("Dave[away]", "Dave[away]", "hi", 1000))
+        .unwrap();
+    s.log_message(&msg("dave{away}", "dave{away}", "back", 2000))
+        .unwrap();
     assert_eq!(s.buffers(NET).unwrap().len(), 1);
 }
 
@@ -294,8 +323,14 @@ fn networks_are_kept_apart() {
     other.network = "OFTC".into();
     s.log_message(&other).unwrap();
 
-    assert_eq!(texts(&s.scrollback(NET, "#c", None, 10).unwrap()), vec!["on libera"]);
-    assert_eq!(texts(&s.scrollback("OFTC", "#c", None, 10).unwrap()), vec!["on oftc"]);
+    assert_eq!(
+        texts(&s.scrollback(NET, "#c", None, 10).unwrap()),
+        vec!["on libera"]
+    );
+    assert_eq!(
+        texts(&s.scrollback("OFTC", "#c", None, 10).unwrap()),
+        vec!["on oftc"]
+    );
     assert_eq!(s.networks().unwrap(), vec!["Libera.Chat", "OFTC"]);
 
     let opts = SearchOptions {
@@ -327,9 +362,12 @@ fn buffer_listing_is_ordered_by_recent_activity_and_counts_messages() {
 #[test]
 fn words_are_anded_in_any_order() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "null pointer in kmalloc", 1000)).unwrap();
-    s.log_message(&msg("#c", "a", "a pointer to nothing", 2000)).unwrap();
-    s.log_message(&msg("#c", "a", "totally unrelated", 3000)).unwrap();
+    s.log_message(&msg("#c", "a", "null pointer in kmalloc", 1000))
+        .unwrap();
+    s.log_message(&msg("#c", "a", "a pointer to nothing", 2000))
+        .unwrap();
+    s.log_message(&msg("#c", "a", "totally unrelated", 3000))
+        .unwrap();
 
     assert_eq!(hits(&s, "pointer").len(), 2);
     assert_eq!(hits(&s, "null pointer"), vec!["null pointer in kmalloc"]);
@@ -340,25 +378,32 @@ fn words_are_anded_in_any_order() {
 #[test]
 fn a_quoted_phrase_must_match_in_order() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "the null pointer bug", 1000)).unwrap();
-    s.log_message(&msg("#c", "a", "pointer to a null value", 2000)).unwrap();
+    s.log_message(&msg("#c", "a", "the null pointer bug", 1000))
+        .unwrap();
+    s.log_message(&msg("#c", "a", "pointer to a null value", 2000))
+        .unwrap();
     assert_eq!(hits(&s, "\"null pointer\""), vec!["the null pointer bug"]);
 }
 
 #[test]
 fn a_trailing_star_matches_word_prefixes() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "kmalloc failed", 1000)).unwrap();
+    s.log_message(&msg("#c", "a", "kmalloc failed", 1000))
+        .unwrap();
     s.log_message(&msg("#c", "a", "kmemdup too", 2000)).unwrap();
     assert_eq!(hits(&s, "kmal*"), vec!["kmalloc failed"]);
     assert_eq!(hits(&s, "km*").len(), 2);
-    assert!(hits(&s, "kmal").is_empty(), "without the star it is a whole word");
+    assert!(
+        hits(&s, "kmal").is_empty(),
+        "without the star it is a whole word"
+    );
 }
 
 #[test]
 fn search_ignores_case() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "Segmentation FAULT", 1000)).unwrap();
+    s.log_message(&msg("#c", "a", "Segmentation FAULT", 1000))
+        .unwrap();
     assert_eq!(hits(&s, "segmentation fault").len(), 1);
 }
 
@@ -366,8 +411,10 @@ fn search_ignores_case() {
 fn formatting_codes_do_not_break_a_word_and_are_not_searchable() {
     let mut s = store();
     // A colour change in the middle of the word "error".
-    s.log_message(&msg("#c", "a", "\u{3}04err\u{3}or: null", 1000)).unwrap();
-    s.log_message(&msg("#c", "a", "\u{2}bold\u{2} claim", 2000)).unwrap();
+    s.log_message(&msg("#c", "a", "\u{3}04err\u{3}or: null", 1000))
+        .unwrap();
+    s.log_message(&msg("#c", "a", "\u{2}bold\u{2} claim", 2000))
+        .unwrap();
 
     assert_eq!(hits(&s, "error").len(), 1);
     assert_eq!(hits(&s, "bold").len(), 1);
@@ -381,15 +428,21 @@ fn formatting_codes_do_not_break_a_word_and_are_not_searchable() {
 #[test]
 fn the_sender_is_not_part_of_what_words_match() {
     let mut s = store();
-    s.log_message(&msg("#c", "bob", "hello there", 1000)).unwrap();
-    assert!(hits(&s, "bob").is_empty(), "use from:bob to search by sender");
+    s.log_message(&msg("#c", "bob", "hello there", 1000))
+        .unwrap();
+    assert!(
+        hits(&s, "bob").is_empty(),
+        "use from:bob to search by sender"
+    );
 }
 
 #[test]
 fn snake_case_identifiers_stay_whole() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "use kmalloc_array here", 1000)).unwrap();
-    s.log_message(&msg("#c", "a", "an array of things", 2000)).unwrap();
+    s.log_message(&msg("#c", "a", "use kmalloc_array here", 1000))
+        .unwrap();
+    s.log_message(&msg("#c", "a", "an array of things", 2000))
+        .unwrap();
 
     // The identifier is one token: "array" alone does not find it...
     assert_eq!(hits(&s, "array"), vec!["an array of things"]);
@@ -401,14 +454,23 @@ fn snake_case_identifiers_stay_whole() {
 #[test]
 fn turkish_text_is_found_with_or_without_diacritics() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "Merhaba dünya, şu Türkçe cümleyi bul", 1000)).unwrap();
+    s.log_message(&msg(
+        "#c",
+        "a",
+        "Merhaba dünya, şu Türkçe cümleyi bul",
+        1000,
+    ))
+    .unwrap();
 
     // Typed exactly, and typed on a keyboard with no Turkish characters.
-    for query in ["dünya", "dunya", "türkçe", "turkce", "cümleyi", "cumleyi", "şu", "su"] {
+    for query in [
+        "dünya", "dunya", "türkçe", "turkce", "cümleyi", "cumleyi", "şu", "su",
+    ] {
         assert_eq!(hits(&s, query).len(), 1, "query {query:?}");
     }
     // Capital dotted İ folds to a plain i.
-    s.log_message(&msg("#c", "a", "İstanbul'a gidiyoruz", 2000)).unwrap();
+    s.log_message(&msg("#c", "a", "İstanbul'a gidiyoruz", 2000))
+        .unwrap();
     assert_eq!(hits(&s, "istanbul").len(), 1);
     assert_eq!(hits(&s, "İstanbul").len(), 1);
 }
@@ -417,7 +479,8 @@ fn turkish_text_is_found_with_or_without_diacritics() {
 fn search_finds_non_latin_scripts_and_emoji_text() {
     let mut s = store();
     s.log_message(&msg("#c", "a", "привет мир", 1000)).unwrap();
-    s.log_message(&msg("#c", "a", "你好 世界 done 🎉", 2000)).unwrap();
+    s.log_message(&msg("#c", "a", "你好 世界 done 🎉", 2000))
+        .unwrap();
     assert_eq!(hits(&s, "привет").len(), 1);
     assert_eq!(hits(&s, "done").len(), 1);
 }
@@ -425,16 +488,26 @@ fn search_finds_non_latin_scripts_and_emoji_text() {
 #[test]
 fn from_and_in_narrow_the_results() {
     let mut s = store();
-    s.log_message(&msg("#kernel", "bob", "oops in the driver", 1000)).unwrap();
-    s.log_message(&msg("#kernel", "carol", "oops in the scheduler", 2000)).unwrap();
-    s.log_message(&msg("#rust", "bob", "oops in the borrow checker", 3000)).unwrap();
+    s.log_message(&msg("#kernel", "bob", "oops in the driver", 1000))
+        .unwrap();
+    s.log_message(&msg("#kernel", "carol", "oops in the scheduler", 2000))
+        .unwrap();
+    s.log_message(&msg("#rust", "bob", "oops in the borrow checker", 3000))
+        .unwrap();
 
     assert_eq!(hits(&s, "oops").len(), 3);
     assert_eq!(hits(&s, "oops from:bob").len(), 2);
-    assert_eq!(hits(&s, "oops from:BOB").len(), 2, "sender match ignores case");
+    assert_eq!(
+        hits(&s, "oops from:BOB").len(),
+        2,
+        "sender match ignores case"
+    );
     assert_eq!(hits(&s, "oops in:#kernel").len(), 2);
     assert_eq!(hits(&s, "oops in:#KERNEL").len(), 2);
-    assert_eq!(hits(&s, "oops from:bob in:#kernel"), vec!["oops in the driver"]);
+    assert_eq!(
+        hits(&s, "oops from:bob in:#kernel"),
+        vec!["oops in the driver"]
+    );
 }
 
 #[test]
@@ -479,15 +552,13 @@ fn relevance_and_recency_order_results_differently() {
     // The older message is the better match: a short message that is all
     // about the term outranks a long one that mentions it in passing.
     s.log_message(&msg("#c", "a", "segfault", 1000)).unwrap();
-    s.log_message(
-        &msg(
-            "#c",
-            "a",
-            "so I was reading a long thread about the kernel and other unrelated things \
+    s.log_message(&msg(
+        "#c",
+        "a",
+        "so I was reading a long thread about the kernel and other unrelated things \
              when somebody mentioned segfault in passing and then moved on to lunch",
-            9000,
-        ),
-    )
+        9000,
+    ))
     .unwrap();
 
     let relevance = s.search("segfault", &SearchOptions::default()).unwrap();
@@ -508,10 +579,17 @@ fn relevance_and_recency_order_results_differently() {
 #[test]
 fn the_snippet_marks_the_match_without_being_fooled_by_markup_in_the_text() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "see <b>the</b> [needle] in [the] haystack", 1000)).unwrap();
+    s.log_message(&msg(
+        "#c",
+        "a",
+        "see <b>the</b> [needle] in [the] haystack",
+        1000,
+    ))
+    .unwrap();
     let hit = &s.search("needle", &SearchOptions::default()).unwrap()[0];
     assert!(
-        hit.snippet.contains(&format!("{MARK_START}needle{MARK_END}")),
+        hit.snippet
+            .contains(&format!("{MARK_START}needle{MARK_END}")),
         "snippet was {:?}",
         hit.snippet
     );
@@ -523,16 +601,26 @@ fn the_snippet_marks_the_match_without_being_fooled_by_markup_in_the_text() {
 #[test]
 fn a_filter_only_hit_gets_the_start_of_the_message_as_its_snippet() {
     let mut s = store();
-    s.log_message(&msg("#c", "bob", &format!("\u{2}{}\u{2}", "x".repeat(500)), 1000)).unwrap();
+    s.log_message(&msg(
+        "#c",
+        "bob",
+        &format!("\u{2}{}\u{2}", "x".repeat(500)),
+        1000,
+    ))
+    .unwrap();
     let hit = &s.search("from:bob", &SearchOptions::default()).unwrap()[0];
     assert_eq!(hit.snippet.chars().count(), 160);
-    assert!(!hit.snippet.contains('\u{2}'), "formatting codes are stripped");
+    assert!(
+        !hit.snippet.contains('\u{2}'),
+        "formatting codes are stripped"
+    );
 }
 
 #[test]
 fn nothing_a_person_can_type_is_a_search_error() {
     let mut s = store();
-    s.log_message(&msg("#c", "a", "some text to search", 1000)).unwrap();
+    s.log_message(&msg("#c", "a", "some text to search", 1000))
+        .unwrap();
     let hostile = [
         "\"",
         "\"\"\"",
@@ -576,13 +664,18 @@ fn nothing_a_person_can_type_is_a_search_error() {
 fn the_result_limit_is_clamped() {
     let mut s = store();
     for i in 0..30 {
-        s.log_message(&msg("#c", "a", &format!("needle {i}"), 1000 + i)).unwrap();
+        s.log_message(&msg("#c", "a", &format!("needle {i}"), 1000 + i))
+            .unwrap();
     }
     let with = |limit| SearchOptions {
         limit,
         ..SearchOptions::default()
     };
-    assert_eq!(s.search("needle", &with(0)).unwrap().len(), 1, "zero is raised to one");
+    assert_eq!(
+        s.search("needle", &with(0)).unwrap().len(),
+        1,
+        "zero is raised to one"
+    );
     assert_eq!(s.search("needle", &with(10)).unwrap().len(), 10);
     assert_eq!(s.search("needle", &with(usize::MAX)).unwrap().len(), 30);
 }
@@ -594,9 +687,14 @@ fn around_returns_a_hit_in_its_conversation() {
     let mut s = store();
     let mut ids = Vec::new();
     for i in 0..9 {
-        ids.push(s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i)).unwrap().unwrap());
+        ids.push(
+            s.log_message(&msg("#c", "a", &format!("m{i}"), 1000 + i))
+                .unwrap()
+                .unwrap(),
+        );
     }
-    s.log_message(&msg("#other", "a", "elsewhere", 1004)).unwrap();
+    s.log_message(&msg("#other", "a", "elsewhere", 1004))
+        .unwrap();
 
     let context = s.around(ids[4], 2).unwrap();
     assert_eq!(texts(&context), vec!["m2", "m3", "m4", "m5", "m6"]);
@@ -614,12 +712,19 @@ fn around_at_the_edges_returns_what_exists() {
 #[test]
 fn a_search_hit_leads_to_its_context() {
     let mut s = store();
-    for (i, text) in ["setup", "the backtrace is here", "and the fix"].iter().enumerate() {
-        s.log_message(&msg("#c", "a", text, 1000 + i as i64)).unwrap();
+    for (i, text) in ["setup", "the backtrace is here", "and the fix"]
+        .iter()
+        .enumerate()
+    {
+        s.log_message(&msg("#c", "a", text, 1000 + i as i64))
+            .unwrap();
     }
     let hit = &s.search("backtrace", &SearchOptions::default()).unwrap()[0];
     let context = s.around(hit.message.id, 1).unwrap();
-    assert_eq!(texts(&context), vec!["setup", "the backtrace is here", "and the fix"]);
+    assert_eq!(
+        texts(&context),
+        vec!["setup", "the backtrace is here", "and the fix"]
+    );
 }
 
 // ---- deleting -----------------------------------------------------------------
@@ -627,15 +732,21 @@ fn a_search_hit_leads_to_its_context() {
 #[test]
 fn deleting_a_buffer_removes_it_from_search_and_keeps_the_index_consistent() {
     let mut s = store();
-    s.log_message(&msg("#gone", "a", "secret plans", 1000)).unwrap();
-    s.log_message(&msg("#gone", "a", "more secret plans", 2000)).unwrap();
-    s.log_message(&msg("#kept", "a", "public plans", 3000)).unwrap();
+    s.log_message(&msg("#gone", "a", "secret plans", 1000))
+        .unwrap();
+    s.log_message(&msg("#gone", "a", "more secret plans", 2000))
+        .unwrap();
+    s.log_message(&msg("#kept", "a", "public plans", 3000))
+        .unwrap();
     assert_eq!(hits(&s, "plans").len(), 3);
 
     assert_eq!(s.delete_buffer(NET, "#GONE").unwrap(), 2);
 
     assert_eq!(hits(&s, "plans"), vec!["public plans"]);
-    assert!(hits(&s, "secret").is_empty(), "deleted text must not stay searchable");
+    assert!(
+        hits(&s, "secret").is_empty(),
+        "deleted text must not stay searchable"
+    );
     assert_eq!(s.message_count().unwrap(), 1);
     assert_eq!(s.buffers(NET).unwrap().len(), 1);
     s.check_index().unwrap();
@@ -685,16 +796,22 @@ fn a_database_from_a_newer_version_is_refused_untouched() {
     match Store::open(&db.0) {
         Err(Error::TooNew { found, supported }) => {
             assert_eq!(found, 99);
-            assert_eq!(supported, 1);
+            assert_eq!(supported, 2);
         }
         other => panic!("expected TooNew, got {other:?}"),
     }
     // Refusing must not have modified it.
     let conn = rusqlite::Connection::open(&db.0).unwrap();
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(version, 99);
     let tables: i64 = conn
-        .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'messages'", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'messages'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(tables, 0);
 }
@@ -720,7 +837,10 @@ fn a_large_log_loads_quickly_and_stays_searchable_and_consistent() {
             } else {
                 format!("ordinary chatter number {i} about nothing")
             };
-            with_id(msg(if i % 2 == 0 { "#even" } else { "#odd" }, "a", &text, i), &format!("id{i}"))
+            with_id(
+                msg(if i % 2 == 0 { "#even" } else { "#odd" }, "a", &text, i),
+                &format!("id{i}"),
+            )
         })
         .collect();
 
@@ -734,8 +854,14 @@ fn a_large_log_loads_quickly_and_stays_searchable_and_consistent() {
 
     assert_eq!(found.len(), 20);
     // Generous bounds: this checks for a pathological slowdown, not a benchmark.
-    assert!(loaded.as_secs() < 30, "loading 20k messages took {loaded:?}");
-    assert!(searched.as_secs() < 2, "searching 20k messages took {searched:?}");
+    assert!(
+        loaded.as_secs() < 30,
+        "loading 20k messages took {loaded:?}"
+    );
+    assert!(
+        searched.as_secs() < 2,
+        "searching 20k messages took {searched:?}"
+    );
 
     // Replaying everything is all duplicates.
     assert_eq!(s.log_messages(&batch).unwrap(), 0);
