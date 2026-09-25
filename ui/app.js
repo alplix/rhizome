@@ -1,33 +1,53 @@
 // The interface's controller: it listens to the backend, keeps `state` up to
 // date, and draws it. Anything that can be decided without the DOM lives in
-// lib.js or state.js, where it is tested.
+// lib.js, state.js or events.js, where it is tested.
 
 import { api } from "./api.js";
+import { ACCENTS, DENSITIES, FONT_SIZES, THEMES, applyAppearance, cacheAppearance } from "./appearance.js";
+import { LANGUAGES, language, locale, setLanguage, t, tn, translateDocument } from "./i18n.js";
+import { HELP, completeNick, fold, isChannelName, nickHue, parseInput } from "./lib.js";
+import { PRESETS } from "./presets.js";
+import { configureRender, el, lineTime, renderLines } from "./render.js";
 import {
+  MAX_LINES,
   SERVER,
   activeBuffer,
   addSystem,
   applyEnvelope,
+  applyKnownBuffers,
+  clearBuffer,
   closeBuffer,
   createState,
   ensureBuffer,
   ensureNetwork,
   findBuffer,
+  lastChatTime,
   leaveContext,
+  markUnreadFrom,
   mergeHistory,
   prependHistory,
   setActive,
+  setFocused,
   showContext,
-  MAX_LINES,
 } from "./state.js";
-import { HELP, completeNick, fold, isChannelName, nickHue, parseInput } from "./lib.js";
-import { el, lineTime, renderLines } from "./render.js";
 
 const $ = (id) => document.getElementById(id);
 const PAGE = 100;
 
+const DEFAULT_SETTINGS = {
+  theme: "system",
+  accent: "theme",
+  density: "comfortable",
+  font_size: "medium",
+  language: "auto",
+  time_format: "24h",
+  show_events: true,
+  notifications: true,
+};
+
 const state = createState();
 let profiles = [];
+let settings = { ...DEFAULT_SETTINGS };
 
 // What is drawn right now, and the small amount of state the view itself keeps.
 const view = {
@@ -71,16 +91,218 @@ function uniqueId(base) {
 
 function statusText(net) {
   switch (net.status) {
-    case "registered": return net.nick ? `Connected as ${net.nick}` : "Connected";
-    case "connecting": return "Connecting…";
-    case "connected": return "Logging in…";
+    case "registered": return net.nick ? t("status.connected_as", { nick: net.nick }) : t("status.connected");
+    case "connecting": return t("status.connecting");
+    case "connected": return t("status.logging_in");
     case "waiting": {
       const seconds = Math.max(0, Math.ceil(((net.retryAt ?? Date.now()) - Date.now()) / 1000));
-      return `Reconnecting in ${seconds}s…`;
+      return t("status.reconnecting", { seconds });
     }
-    case "failed": return "Disconnected";
-    default: return "Not connected";
+    case "failed": return t("status.disconnected");
+    default: return t("status.idle");
   }
+}
+
+// ---- modal questions -----------------------------------------------------
+
+// Shows a modal dialog and resolves with what `answer()` returns when its form
+// is submitted, or with null if the person cancels.
+//
+// The answer is taken from the form's own submit and the cancel button's own
+// click. The dialog's `close` event is used only as a fallback for Escape: it is
+// dispatched asynchronously, and code that waits for it can wait far longer than
+// the person expects.
+function ask(dialog, { form, cancel, answer }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      cancel.removeEventListener("click", onCancel);
+      dialog.removeEventListener("close", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      finish(answer());
+    };
+    const onCancel = () => finish(null);
+    form.addEventListener("submit", onSubmit);
+    cancel.addEventListener("click", onCancel);
+    dialog.addEventListener("close", onCancel);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+  });
+}
+
+// Asks for confirmation of something that cannot be undone.
+async function confirmDialog({ title, body, ok }) {
+  $("confirm-title").textContent = title;
+  $("confirm-body").textContent = body;
+  $("btn-confirm-ok").textContent = ok;
+  const answer = await ask($("confirm-dialog"), {
+    form: $("confirm-form"),
+    cancel: $("btn-confirm-cancel"),
+    answer: () => true,
+  });
+  return answer === true;
+}
+
+// ---- settings -----------------------------------------------------------------
+
+const radioNames = { theme: "theme", accent: "accent", density: "density", font_size: "font" };
+
+// Applies the settings to the window: language, theme, time format, and what is
+// shown. With `save`, also writes them to the settings file.
+function applySettings(next = {}, { save = false, rerender = true } = {}) {
+  settings = { ...settings, ...next };
+  setLanguage(settings.language);
+  translateDocument();
+  applyAppearance(settings, document.documentElement, matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.hour12 = String(settings.time_format === "12h");
+  configureRender({ hour12: settings.time_format === "12h", locale: locale() });
+  $("messages").classList.toggle("hide-events", !settings.show_events);
+  cacheAppearance(settings);
+  syncSettingsControls();
+  if (rerender) renderAll({ scroll: "same" });
+  if (save) api.saveSettings(settings).catch(fail);
+}
+
+// A small preview of a theme, drawn with that theme's own colours.
+function themePreview(theme) {
+  const pv = el("span", "pv");
+  pv.dataset.theme = theme;
+  pv.append(el("i"), el("i"), el("i"));
+  return pv;
+}
+
+function radioLabel(group, value, className) {
+  const label = el("label", className);
+  const input = el("input");
+  input.type = "radio";
+  input.name = group;
+  input.value = value;
+  label.append(input);
+  return { label, input };
+}
+
+// Builds the controls in the settings dialog. Called again when the language
+// changes, since their labels are text.
+function buildSettingsControls() {
+  const themeGrid = $("theme-grid");
+  themeGrid.replaceChildren();
+  for (const theme of THEMES) {
+    const { label } = radioLabel("theme", theme, "theme-card");
+    const frame = el("span", "frame");
+    if (theme === "system") frame.append(themePreview("graphite"), themePreview("daylight"));
+    else frame.append(themePreview(theme));
+    label.append(frame, el("span", "name", t(`theme.${theme}`)));
+    themeGrid.append(label);
+  }
+
+  const accentRow = $("accent-row");
+  accentRow.replaceChildren();
+  for (const accent of ACCENTS) {
+    const { label } = radioLabel("accent", accent, "accent-dot");
+    label.dataset.accent = accent;
+    label.title = t(`accent.${accent}`);
+    label.append(el("span"));
+    accentRow.append(label);
+  }
+
+  const segmented = (container, group, values, key) => {
+    container.replaceChildren();
+    for (const value of values) {
+      const { label } = radioLabel(group, value);
+      label.append(document.createTextNode(t(`${key}.${value}`)));
+      container.append(label);
+    }
+  };
+  segmented($("density-row"), "density", DENSITIES, "density");
+  segmented($("font-row"), "font", FONT_SIZES, "font");
+
+  const select = $("s-language");
+  select.replaceChildren();
+  const auto = el("option", undefined, t("settings.language_auto"));
+  auto.value = "auto";
+  select.append(auto);
+  for (const [code, name] of LANGUAGES) {
+    const option = el("option", undefined, name);
+    option.value = code;
+    select.append(option);
+  }
+
+  const shortcuts = $("shortcut-list");
+  shortcuts.replaceChildren();
+  for (const [keys, what] of [
+    [["Ctrl", "K"], "shortcut.search"],
+    [["Ctrl", ","], "shortcut.settings"],
+    [["Alt", "↑ / ↓"], "shortcut.switch"],
+    [["Tab"], "shortcut.complete"],
+    [["↑"], "shortcut.recall"],
+    [["Shift", "Enter"], "shortcut.newline"],
+    [["PgUp / PgDn"], "shortcut.scroll"],
+    [["Esc"], "shortcut.close"],
+  ]) {
+    const dt = el("dt");
+    keys.forEach((k) => dt.append(el("kbd", undefined, k)));
+    shortcuts.append(dt, el("dd", undefined, t(what)));
+  }
+  syncSettingsControls();
+}
+
+// Makes the controls show the current settings.
+function syncSettingsControls() {
+  for (const [key, group] of Object.entries(radioNames)) {
+    for (const input of document.querySelectorAll(`input[name="${group}"]`)) input.checked = input.value === settings[key];
+  }
+  $("s-language").value = settings.language;
+  $("s-time").value = settings.time_format;
+  $("s-events").checked = settings.show_events;
+  $("s-notify").checked = settings.notifications;
+}
+
+async function openSettings() {
+  buildSettingsControls();
+  try {
+    const info = await api.appInfo();
+    $("about-version").textContent = info.version;
+    $("about-license").textContent = info.license;
+    $("about-data").textContent = info.data_dir;
+  } catch (error) {
+    fail(error);
+  }
+  if (!$("settings-dialog").open) $("settings-dialog").showModal();
+}
+
+function bindSettings() {
+  $("settings-dialog").addEventListener("change", (event) => {
+    const input = event.target;
+    if (input.type === "radio") {
+      const key = Object.keys(radioNames).find((k) => radioNames[k] === input.name);
+      if (key) applySettings({ [key]: input.value }, { save: true });
+    } else if (input.id === "s-language") {
+      applySettings({ language: input.value }, { save: true });
+      buildSettingsControls();
+    } else if (input.id === "s-time") {
+      applySettings({ time_format: input.value }, { save: true });
+    } else if (input.id === "s-events") {
+      applySettings({ show_events: input.checked }, { save: true });
+    } else if (input.id === "s-notify") {
+      applySettings({ notifications: input.checked }, { save: true, rerender: false });
+    }
+  });
+  $("btn-test-notify").addEventListener("click", async () => {
+    const shown = await api.notify("Rhizome", t("settings.test_body")).catch(() => false);
+    if (!shown) toast(t("settings.notify_blocked"), "error");
+  });
+  // "System" follows the operating system, including while the window is open.
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (settings.theme === "system") applySettings({}, {});
+  });
 }
 
 // ---- sidebar -------------------------------------------------------------
@@ -94,9 +316,24 @@ function orderedKeys(net) {
 function badge(buffer) {
   if (buffer.unread === 0) return null;
   const b = el("span", buffer.highlights > 0 ? "badge highlight" : "badge", buffer.unread > 99 ? "99+" : String(buffer.unread));
-  b.title = buffer.highlights > 0 ? `${buffer.unread} unread, ${buffer.highlights} mentioning you` : `${buffer.unread} unread`;
+  b.title =
+    buffer.highlights > 0
+      ? t("sidebar.unread_mentions", { count: buffer.unread, mentions: buffer.highlights })
+      : t("sidebar.unread", { count: buffer.unread });
   return b;
 }
+
+const chevron = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M9 6l6 6-6 6");
+  svg.append(path);
+  return svg;
+};
 
 function renderSidebar() {
   const list = $("buffer-list");
@@ -104,6 +341,14 @@ function renderSidebar() {
   for (const net of state.networks.values()) {
     const section = el("section", "network");
     const head = el("div", "network-head");
+
+    const toggle = el("button", "network-toggle");
+    toggle.type = "button";
+    toggle.dataset.network = net.id;
+    toggle.dataset.action = "collapse";
+    toggle.setAttribute("aria-expanded", String(!net.collapsed));
+    toggle.setAttribute("aria-label", net.collapsed ? t("sidebar.expand") : t("sidebar.collapse"));
+    toggle.append(chevron());
 
     const name = el("button", "network-name");
     name.type = "button";
@@ -116,42 +361,57 @@ function renderSidebar() {
     const serverBadge = badge(net.buffers.get(SERVER));
     if (serverBadge) name.append(serverBadge);
 
-    const toggle = el("button", "link-btn", isLive(net) ? "Disconnect" : "Connect");
-    toggle.type = "button";
-    toggle.dataset.network = net.id;
-    toggle.dataset.action = isLive(net) ? "disconnect" : "connect";
-    head.append(name, toggle);
+    const connect = el("button", "link-btn", isLive(net) ? t("sidebar.disconnect") : t("sidebar.connect"));
+    connect.type = "button";
+    connect.dataset.network = net.id;
+    connect.dataset.action = isLive(net) ? "disconnect" : "connect";
+    head.append(toggle, name, connect);
+    section.append(head);
 
-    const buffers = el("ul", "buffers");
-    for (const key of orderedKeys(net)) {
-      const buffer = net.buffers.get(key);
-      const item = el("li");
-      const button = el("button", "buffer");
-      button.type = "button";
-      button.dataset.network = net.id;
-      button.dataset.key = key;
-      if (isActive(net.id, key)) button.setAttribute("aria-current", "true");
-      if (buffer.unread > 0) button.classList.add("unread");
-      if (buffer.kind === "channel" && !buffer.joined) button.classList.add("parted");
-      button.append(el("span", "hash", buffer.kind === "channel" ? "#" : "@"));
-      button.append(el("span", "label", buffer.kind === "channel" ? buffer.name.replace(/^[#&+!]/, "") : buffer.name));
-      const b = badge(buffer);
-      if (b) button.append(b);
-
-      const close = el("button", "buffer-close", "×");
-      close.type = "button";
-      close.dataset.network = net.id;
-      close.dataset.key = key;
-      close.dataset.action = "close";
-      close.title = buffer.kind === "channel" && buffer.joined ? "Leave channel" : "Close";
-      close.setAttribute("aria-label", close.title);
-      item.append(button, close);
-      buffers.append(item);
+    if (!net.collapsed) {
+      const keys = orderedKeys(net);
+      const channels = keys.filter((k) => net.buffers.get(k).kind === "channel");
+      const talks = keys.filter((k) => net.buffers.get(k).kind !== "channel");
+      const buffers = el("ul", "buffers");
+      const groups = [];
+      if (channels.length) groups.push([t("sidebar.channels"), channels]);
+      if (talks.length) groups.push([t("sidebar.conversations"), talks]);
+      const labelled = keys.length > 4 && groups.length > 1;
+      for (const [label, members] of groups) {
+        if (labelled) buffers.append(el("li", "group-label", label));
+        for (const key of members) buffers.append(bufferItem(net, key));
+      }
+      section.append(buffers);
     }
-    section.append(head, buffers);
     list.append(section);
   }
   updateTitle();
+}
+
+function bufferItem(net, key) {
+  const buffer = net.buffers.get(key);
+  const item = el("li");
+  const button = el("button", "buffer");
+  button.type = "button";
+  button.dataset.network = net.id;
+  button.dataset.key = key;
+  if (isActive(net.id, key)) button.setAttribute("aria-current", "true");
+  if (buffer.unread > 0) button.classList.add("unread");
+  if (buffer.kind === "channel" && !buffer.joined) button.classList.add("parted");
+  button.append(el("span", "hash", buffer.kind === "channel" ? "#" : "@"));
+  button.append(el("span", "label", buffer.kind === "channel" ? buffer.name.replace(/^[#&+!]/, "") : buffer.name));
+  const b = badge(buffer);
+  if (b) button.append(b);
+
+  const close = el("button", "buffer-close", "×");
+  close.type = "button";
+  close.dataset.network = net.id;
+  close.dataset.key = key;
+  close.dataset.action = "close";
+  close.title = buffer.kind === "channel" && buffer.joined ? t("sidebar.leave_channel") : t("sidebar.close");
+  close.setAttribute("aria-label", close.title);
+  item.append(button, close);
+  return item;
 }
 
 function updateTitle() {
@@ -160,7 +420,7 @@ function updateTitle() {
   document.title = mentions > 0 ? `(${mentions}) Rhizome` : "Rhizome";
 }
 
-// ---- header, members, composer -------------------------------------------
+// ---- header, members, composer, welcome ----------------------------------
 
 function renderHeader() {
   const buffer = activeBuffer(state);
@@ -168,13 +428,14 @@ function renderHeader() {
   const status = $("status");
   if (!buffer || !net) {
     $("title-name").textContent = "Rhizome";
-    $("title-topic").textContent = "Add a network to get started.";
+    $("title-topic").textContent = t("header.add_network");
     status.textContent = "";
     $("context-banner").hidden = true;
     return;
   }
   $("title-name").textContent = buffer.kind === "server" ? net.name : buffer.name;
-  const topic = buffer.kind === "channel" ? (buffer.topic ?? "") : buffer.kind === "server" ? `${net.name} · server messages` : "Private conversation";
+  const topic =
+    buffer.kind === "channel" ? (buffer.topic ?? "") : buffer.kind === "server" ? t("header.server", { name: net.name }) : t("header.private");
   $("title-topic").textContent = topic;
   $("title-topic").title = topic;
   status.textContent = statusText(net);
@@ -187,17 +448,17 @@ function renderMembers() {
   const list = $("members");
   list.replaceChildren();
   if (!buffer || buffer.kind !== "channel") {
-    $("members-title").textContent = buffer?.kind === "query" ? "Conversation" : "Members";
+    $("members-title").textContent = buffer?.kind === "query" ? t("members.conversation") : t("top.members");
     return;
   }
-  $("members-title").textContent = `Members · ${buffer.members.length}`;
+  $("members-title").textContent = t("members.title", { count: buffer.members.length });
   const fragment = document.createDocumentFragment();
   for (const member of buffer.members) {
     const item = el("li");
     const button = el("button", "member");
     button.type = "button";
     button.dataset.nick = member.nick;
-    button.title = `Message ${member.nick}`;
+    button.title = t("members.message", { nick: member.nick });
     const nick = el("span", "nick", member.nick);
     nick.style.setProperty("--h", String(nickHue(member.nick)));
     button.append(el("span", "prefix", member.prefixes[0] ?? ""), nick);
@@ -210,12 +471,23 @@ function renderMembers() {
 function renderComposer() {
   const buffer = activeBuffer(state);
   const input = $("input");
-  if (!buffer) {
-    input.placeholder = "Add a network to begin";
-  } else if (buffer.kind === "server") {
-    input.placeholder = "Commands only here. Try /join #channel or /help";
-  } else {
-    input.placeholder = `Message ${buffer.name}`;
+  if (!buffer) input.placeholder = t("composer.placeholder_none");
+  else if (buffer.kind === "server") input.placeholder = t("composer.placeholder_server");
+  else input.placeholder = t("composer.placeholder_buffer", { name: buffer.name });
+}
+
+// The first-run screen, shown until there is a network to talk to.
+function renderWelcome() {
+  const show = state.networks.size === 0;
+  $("welcome").hidden = !show;
+  if (!show) return;
+  const chips = $("welcome-presets");
+  chips.replaceChildren();
+  for (const preset of PRESETS) {
+    const chip = el("button", "preset-chip", preset.name);
+    chip.type = "button";
+    chip.addEventListener("click", () => openProfileEditor(null, preset));
+    chips.append(chip);
   }
 }
 
@@ -224,6 +496,7 @@ function renderAll(options) {
   renderHeader();
   renderMembers();
   renderComposer();
+  renderWelcome();
   renderMessages(options);
 }
 
@@ -238,20 +511,23 @@ const atBottom = () => {
 function updatePill() {
   const pill = $("new-pill");
   pill.hidden = view.unseen === 0;
-  if (view.unseen > 0) pill.textContent = `↓ ${view.unseen} new message${view.unseen === 1 ? "" : "s"}`;
+  if (view.unseen > 0) pill.textContent = tn("messages.pill", view.unseen);
 }
 
 function emptyText(buffer) {
-  if (!buffer) return "Add a network with the + button to get started.";
-  if (buffer.kind === "server") return "Messages from the server appear here.";
-  return "No messages yet.";
+  if (!buffer) return t("empty.no_network");
+  if (buffer.kind === "server") return t("empty.server");
+  return t("empty.none");
 }
 
-// Redraws the active buffer. `scroll` is "bottom", "target" (the search result)
-// or "keep" (after loading older history, so the view does not jump).
+// Redraws the active buffer. `scroll` is "bottom", "target" (the search result),
+// "keep" (after loading older history, so the view does not jump) or "same"
+// (leave the scroll position alone, for a change of theme or language).
 function renderMessages({ scroll = "bottom", previousHeight = 0 } = {}) {
   const buffer = activeBuffer(state);
   const box = messagesBox();
+  const before = box.scrollTop;
+  const wasAtBottom = atBottom();
   box.replaceChildren();
   view.unseen = 0;
   updatePill();
@@ -275,6 +551,8 @@ function renderMessages({ scroll = "bottom", previousHeight = 0 } = {}) {
     box.querySelector(".target")?.scrollIntoView({ block: "center" });
   } else if (scroll === "keep") {
     box.scrollTop += box.scrollHeight - previousHeight;
+  } else if (scroll === "same") {
+    box.scrollTop = wasAtBottom ? box.scrollHeight : before;
   } else {
     box.scrollTop = box.scrollHeight;
   }
@@ -302,12 +580,43 @@ function appendNew(buffer) {
   if (stick) {
     box.scrollTop = box.scrollHeight;
   } else {
-    view.unseen += fresh.filter((l) => l.kind === "message" && !l.message.own).length;
+    view.unseen += fresh.filter((l) => l.kind === "message" && l.message.kind !== "event" && !l.message.own).length;
     updatePill();
   }
 }
 
-async function loadHistory(network, buffer) {
+// ---- reading and marking read -----------------------------------------------
+
+const markTimers = new Map();
+
+// Tells the log how far a conversation has been read, shortly after the last
+// message that was on screen. Waiting a moment folds a burst of messages into
+// one write.
+function scheduleMarkRead(network, buffer, delay = 700) {
+  if (buffer.context || !state.focused) return;
+  const upTo = lastChatTime(buffer);
+  if (upTo === null) return;
+  const id = `${network}\0${buffer.key}`;
+  clearTimeout(markTimers.get(id));
+  markTimers.set(
+    id,
+    setTimeout(() => {
+      markTimers.delete(id);
+      api.markRead(network, buffer.name, upTo).catch(() => {});
+    }, delay),
+  );
+}
+
+// Marks now, without the delay: used when leaving a conversation.
+function markReadNow(network, buffer) {
+  const id = `${network}\0${buffer.key}`;
+  clearTimeout(markTimers.get(id));
+  markTimers.delete(id);
+  const upTo = lastChatTime(buffer);
+  if (upTo !== null && !buffer.context) api.markRead(network, buffer.name, upTo).catch(() => {});
+}
+
+async function loadHistory(network, buffer, { unread = 0 } = {}) {
   if (buffer.kind === "server") {
     buffer.loaded = true;
     return;
@@ -315,11 +624,16 @@ async function loadHistory(network, buffer) {
   try {
     const page = await api.scrollback(network, buffer.name, null, PAGE);
     mergeHistory(buffer, page, { pageSize: PAGE });
+    // Show where the unread messages begin, from what the log said was unread.
+    if (unread > 0) markUnreadFrom(buffer, unread);
   } catch (error) {
     buffer.loaded = true;
     fail(error);
   }
-  if (isActive(network, buffer.key)) renderMessages({ scroll: "bottom" });
+  if (isActive(network, buffer.key)) {
+    renderMessages({ scroll: "bottom" });
+    scheduleMarkRead(network, buffer, 300);
+  }
 }
 
 async function loadOlder(buffer) {
@@ -347,20 +661,26 @@ async function loadOlder(buffer) {
 // ---- switching buffers ---------------------------------------------------
 
 async function activate(network, key) {
+  const previous = activeBuffer(state);
+  if (previous && !isActive(network, key)) markReadNow(state.active.network, previous);
+  const target = findBuffer(state, network, key);
+  // Remember what was unread before opening it clears the count.
+  const unread = target ? target.unread : 0;
   const buffer = setActive(state, network, key);
   if (!buffer) return;
   view.completion = null;
   document.body.classList.remove("show-sidebar", "show-members");
   renderAll({ scroll: "bottom" });
   $("input").focus();
-  if (!buffer.loaded) await loadHistory(network, buffer);
+  if (!buffer.loaded) await loadHistory(network, buffer, { unread });
+  else scheduleMarkRead(network, buffer, 300);
 }
 
 function flatBuffers() {
   const out = [];
   for (const net of state.networks.values()) {
     out.push([net.id, SERVER]);
-    for (const key of orderedKeys(net)) out.push([net.id, key]);
+    if (!net.collapsed) for (const key of orderedKeys(net)) out.push([net.id, key]);
   }
   return out;
 }
@@ -374,6 +694,21 @@ function cycleBuffer(step) {
 }
 
 // ---- backend events ------------------------------------------------------
+
+const lastNotified = new Map();
+
+// Tells the desktop about a message that needs attention, if the person is not
+// already looking at it and has not switched notifications off.
+function maybeNotify(effect) {
+  const { message: m } = effect;
+  if (!settings.notifications || !m.highlight) return;
+  if (state.focused && isActive(effect.network, effect.key)) return;
+  const id = `${effect.network}\0${effect.key}`;
+  if (Date.now() - (lastNotified.get(id) ?? 0) < 3000) return;
+  lastNotified.set(id, Date.now());
+  const title = isChannelName(m.buffer) ? t("notify.mention", { sender: m.sender, buffer: m.buffer }) : t("notify.private", { sender: m.sender });
+  api.notify(title, m.plain.slice(0, 140)).catch(() => {});
+}
 
 function runEffect(effect) {
   switch (effect.type) {
@@ -390,11 +725,17 @@ function runEffect(effect) {
       api.buffers(effect.network)
         .then((list) => {
           const net = state.networks.get(effect.network);
-          for (const b of list) if (net && !isChannelName(b.name)) ensureBuffer(net, b.name, "query");
+          if (net) applyKnownBuffers(net, list.filter((b) => !isChannelName(b.name)));
           renderSidebar();
         })
         .catch(() => {});
       break;
+    case "incoming": {
+      const buffer = findBuffer(state, effect.network, effect.key);
+      if (buffer && isActive(effect.network, effect.key)) scheduleMarkRead(effect.network, buffer);
+      maybeNotify(effect);
+      break;
+    }
     case "refresh_names":
       scheduleNamesRefresh(effect.network, effect.channel);
       break;
@@ -437,49 +778,16 @@ function onEnvelope(envelope) {
   }
 }
 
-// ---- modal questions -----------------------------------------------------
-
-// Shows a modal dialog and resolves with what `answer()` returns when its form
-// is submitted, or with null if the person cancels.
-//
-// The answer is taken from the form's own submit and the cancel button's own
-// click. The dialog's `close` event is used only as a fallback for Escape: it is
-// dispatched asynchronously, and code that waits for it can wait far longer than
-// the person expects.
-function ask(dialog, { form, cancel, answer }) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      form.removeEventListener("submit", onSubmit);
-      cancel.removeEventListener("click", onCancel);
-      dialog.removeEventListener("close", onCancel);
-      dialog.removeEventListener("cancel", onCancel);
-      if (dialog.open) dialog.close();
-      resolve(value);
-    };
-    const onSubmit = (event) => {
-      event.preventDefault();
-      finish(answer());
-    };
-    const onCancel = () => finish(null);
-    form.addEventListener("submit", onSubmit);
-    cancel.addEventListener("click", onCancel);
-    dialog.addEventListener("close", onCancel);
-    dialog.addEventListener("cancel", onCancel);
-    dialog.showModal();
-  });
-}
-
 // ---- sending -------------------------------------------------------------
 
 async function paste(text) {
   const lines = text.split("\n").filter((l) => l.trim() !== "");
   if (lines.length <= 3) return true;
-  $("paste-lead").textContent = `This will send ${lines.length} separate messages to ${activeBuffer(state)?.name ?? "the channel"}.`;
-  $("paste-preview").textContent = lines.slice(0, 8).join("\n") + (lines.length > 8 ? `\n… and ${lines.length - 8} more` : "");
-  $("btn-paste-send").textContent = `Send ${lines.length} messages`;
+  const target = activeBuffer(state)?.name ?? "";
+  $("paste-lead").textContent = t("paste.lead", { count: lines.length, target });
+  $("paste-preview").textContent =
+    lines.slice(0, 8).join("\n") + (lines.length > 8 ? `\n${t("paste.more", { count: lines.length - 8 })}` : "");
+  $("btn-paste-send").textContent = t("paste.send", { count: lines.length });
   const answer = await ask($("paste-dialog"), {
     form: $("paste-form"),
     cancel: $("btn-paste-cancel"),
@@ -488,13 +796,18 @@ async function paste(text) {
   return answer === true;
 }
 
+function say(buffer, net, text, level = "info") {
+  addSystem(state, net.id, buffer.key, text, level);
+  appendNew(buffer);
+}
+
 async function runAction(action, net, buffer) {
   const target = buffer.name;
   switch (action.type) {
     case "message":
     case "action": {
       if (buffer.kind === "server") {
-        toast("Pick a channel or conversation first. Try /join #channel", "error");
+        toast(t("toast.pick_channel"), "error");
         return false;
       }
       if (!(await paste(action.text))) return false;
@@ -528,13 +841,24 @@ async function runAction(action, net, buffer) {
     case "search":
       openSearch(action.query);
       return true;
+    case "clear": {
+      const ok = await confirmDialog({
+        title: t("confirm.clear_title"),
+        body: t("confirm.clear_body", { name: buffer.name }),
+        ok: t("confirm.clear_ok"),
+      });
+      if (!ok) return false;
+      const removed = await api.clearHistory(net.id, buffer.name);
+      clearBuffer(buffer);
+      renderAll({ scroll: "bottom" });
+      toast(tn("toast.history_cleared", removed));
+      return true;
+    }
     case "help":
-      for (const line of HELP) addSystem(state, net.id, buffer.key, line, "info");
-      appendNew(buffer);
+      for (const [usage, key] of HELP) say(buffer, net, `${usage}  —  ${t(key)}`);
       return true;
     case "error":
-      addSystem(state, net.id, buffer.key, action.text, "error");
-      appendNew(buffer);
+      say(buffer, net, t(action.key, action.params), "error");
       return true;
     default:
       return true;
@@ -547,13 +871,13 @@ async function submit() {
   const net = activeNet();
   const buffer = activeBuffer(state);
   if (!net || !buffer) {
-    toast("Add a network first.", "error");
+    toast(t("toast.add_network_first"), "error");
     return;
   }
   const action = parseInput(text, { buffer: buffer.kind === "server" ? SERVER : buffer.name, isChannel: buffer.kind === "channel" });
   if (!action) return;
   if (["message", "action", "notice", "query", "join", "part", "nick", "raw"].includes(action.type) && net.status !== "registered") {
-    toast(`${net.name} is not connected.`, "error");
+    toast(t("toast.not_connected", { name: net.name }), "error");
     return;
   }
   try {
@@ -598,38 +922,64 @@ async function refreshProfiles() {
   for (const p of profiles) {
     const net = ensureNetwork(state, p.id, p.name);
     net.name = p.name;
-    const server = net.buffers.get(SERVER);
-    server.name = p.name;
+    net.buffers.get(SERVER).name = p.name;
   }
 }
 
-function renderProfileList() {
+// Fills the sidebar with the conversations the log already has for each
+// network, so unread counts are there before anything connects.
+async function loadKnownBuffers() {
+  await Promise.all(
+    profiles.map(async (p) => {
+      try {
+        applyKnownBuffers(state.networks.get(p.id), await api.buffers(p.id));
+      } catch {
+        // The sidebar simply starts with what is live.
+      }
+    }),
+  );
+}
+
+async function renderProfileList() {
   const list = $("profile-list");
   list.replaceChildren();
   if (profiles.length === 0) {
-    list.append(el("li", "none", "No networks yet."));
+    list.append(el("li", "none", t("networks.none")));
     return;
   }
-  for (const p of profiles) {
+  const remembered = await Promise.all(profiles.map((p) => (p.sasl_account ? api.hasSavedPassword(p.id).catch(() => false) : false)));
+  profiles.forEach((p, index) => {
     const net = state.networks.get(p.id);
     const item = el("li");
     const info = el("div", "info");
-    info.append(el("strong", undefined, p.name), el("span", undefined, `${p.host}:${p.port}${p.tls ? "" : " (no TLS)"} · ${p.nick}${p.sasl_account ? ` · account ${p.sasl_account}` : ""}`));
+    const title = el("strong", undefined, p.name);
+    if (p.autoconnect) title.append(el("span", "tag", t("networks.auto")));
+    const details = [`${p.host}:${p.port}${p.tls ? "" : ` ${t("networks.no_tls")}`}`, p.nick];
+    if (p.sasl_account) details.push(t("networks.account", { account: p.sasl_account }));
+    info.append(title, el("span", undefined, details.join(" · ")));
+    item.append(info);
 
-    const connect = el("button", undefined, net && isLive(net) ? "Disconnect" : "Connect");
-    connect.type = "button";
-    connect.addEventListener("click", async () => {
+    const button = (label, onClick) => {
+      const b = el("button", undefined, label);
+      b.type = "button";
+      b.addEventListener("click", onClick);
+      item.append(b);
+    };
+    button(net && isLive(net) ? t("networks.disconnect") : t("networks.connect"), async () => {
       if (net && isLive(net)) await api.disconnect(p.id).catch(fail);
       else await connectProfile(p.id);
       renderProfileList();
     });
-    const edit = el("button", undefined, "Edit");
-    edit.type = "button";
-    edit.addEventListener("click", () => openProfileEditor(p));
-    const remove = el("button", undefined, "Delete");
-    remove.type = "button";
-    remove.addEventListener("click", async () => {
-      if (net && isLive(net)) return toast("Disconnect before deleting a network.", "error");
+    if (remembered[index]) {
+      button(t("networks.forget_password"), async () => {
+        await api.forgetPassword(p.id).catch(fail);
+        toast(t("toast.password_forgotten"));
+        renderProfileList();
+      });
+    }
+    button(t("networks.edit"), () => openProfileEditor(p));
+    button(t("networks.delete"), async () => {
+      if (net && isLive(net)) return toast(t("toast.disconnect_first"), "error");
       try {
         await api.deleteProfile(p.id);
         state.networks.delete(p.id);
@@ -641,9 +991,8 @@ function renderProfileList() {
         fail(error);
       }
     });
-    item.append(info, connect, edit, remove);
     list.append(item);
-  }
+  });
 }
 
 function openNetworks() {
@@ -651,11 +1000,35 @@ function openNetworks() {
   $("networks-dialog").showModal();
 }
 
-function openProfileEditor(profile) {
+function fillPresetChoices(selected) {
+  const select = $("p-preset");
+  select.replaceChildren();
+  const custom = el("option", undefined, t("profile.preset_custom"));
+  custom.value = "";
+  select.append(custom);
+  for (const preset of PRESETS) {
+    const option = el("option", undefined, preset.name);
+    option.value = preset.id;
+    select.append(option);
+  }
+  select.value = selected?.id ?? "";
+}
+
+function applyPreset(preset) {
+  if (!preset) return;
+  $("p-name").value = preset.name;
+  $("p-host").value = preset.host;
+  $("p-port").value = String(preset.port);
+  $("p-tls").checked = preset.tls;
+}
+
+function openProfileEditor(profile, preset = null) {
   const dialog = $("profile-dialog");
   const form = $("profile-form");
   form.dataset.editing = profile?.id ?? "";
-  $("profile-title").textContent = profile ? `Edit ${profile.name}` : "Add a network";
+  $("preset-row").hidden = Boolean(profile);
+  fillPresetChoices(preset);
+  $("profile-title").textContent = profile ? t("profile.edit_title", { name: profile.name }) : t("profile.add_title");
   $("p-name").value = profile?.name ?? "";
   $("p-host").value = profile?.host ?? "";
   $("p-port").value = String(profile?.port ?? 6697);
@@ -665,9 +1038,12 @@ function openProfileEditor(profile) {
   $("p-realname").value = profile?.realname ?? "Rhizome";
   $("p-channels").value = (profile?.channels ?? []).join(", ");
   $("p-account").value = profile?.sasl_account ?? "";
+  $("p-autoconnect").checked = profile?.autoconnect ?? false;
+  if (!profile) applyPreset(preset);
   $("profile-error").hidden = true;
+  if ($("networks-dialog").open) $("networks-dialog").close();
   if (!dialog.open) dialog.showModal();
-  $("p-name").focus();
+  (preset && !profile ? $("p-nick") : $("p-name")).focus();
 }
 
 async function saveProfileFromForm() {
@@ -685,6 +1061,7 @@ async function saveProfileFromForm() {
     realname: $("p-realname").value.trim() || "Rhizome",
     channels: $("p-channels").value.split(/[\s,]+/).filter(Boolean),
     sasl_account: $("p-account").value.trim() || null,
+    autoconnect: $("p-autoconnect").checked,
   };
   try {
     await api.saveProfile(profile);
@@ -701,15 +1078,18 @@ async function saveProfileFromForm() {
   if (!activeBuffer(state)) await activate(profile.id, SERVER);
 }
 
+// Asks for the password of the account a network logs in to. Resolves to
+// { password, remember }, or null if the person cancels.
 async function askPassword(profile) {
   const input = $("password-input");
-  $("password-account").textContent = profile.sasl_account;
+  $("password-for").textContent = t("password.for", { account: profile.sasl_account });
   input.value = "";
+  $("password-remember").checked = false;
   try {
     const pending = ask($("password-dialog"), {
       form: $("password-form"),
       cancel: $("btn-password-cancel"),
-      answer: () => input.value,
+      answer: () => ({ password: input.value, remember: $("password-remember").checked }),
     });
     input.focus();
     return await pending;
@@ -719,17 +1099,30 @@ async function askPassword(profile) {
   }
 }
 
-async function connectProfile(id) {
+// Connects a saved network. A network that logs in needs a password: a
+// remembered one is used silently, otherwise it is asked for, unless this is an
+// automatic connection at startup, in which case nobody is there to ask.
+async function connectProfile(id, { auto = false } = {}) {
   const profile = profiles.find((p) => p.id === id);
   if (!profile) return;
   let password = null;
+  let remember = false;
   if (profile.sasl_account) {
-    password = await askPassword(profile);
-    if (password === null) return;
+    const saved = await api.hasSavedPassword(id).catch(() => false);
+    if (!saved) {
+      if (auto) {
+        const net = state.networks.get(id);
+        if (net) say(net.buffers.get(SERVER), net, t("sys.autoconnect_needs_password", { account: profile.sasl_account }), "error");
+        return;
+      }
+      const answer = await askPassword(profile);
+      if (answer === null) return;
+      ({ password, remember } = answer);
+    }
   }
   try {
-    await api.connect(id, password);
-    await activate(id, SERVER);
+    await api.connect(id, password, remember);
+    if (!auto) await activate(id, SERVER);
   } catch (error) {
     fail(error);
   }
@@ -763,8 +1156,7 @@ function renderHits(hits, query) {
   search.hits = hits;
   search.selected = -1;
   if (hits.length === 0) {
-    const none = el("li", "search-none", query.trim() ? "Nothing found." : "Type to search every message you have logged.");
-    list.append(none);
+    list.append(el("li", "search-none", query.trim() ? t("search.none") : t("search.prompt")));
     $("search-count").textContent = "";
     return;
   }
@@ -775,11 +1167,7 @@ function renderHits(hits, query) {
     item.setAttribute("aria-selected", "false");
     item.dataset.index = String(index);
     const meta = el("div", "hit-meta");
-    meta.append(
-      el("span", "where", m.buffer),
-      el("span", undefined, m.sender),
-      el("time", undefined, new Date(m.time_ms).toLocaleString()),
-    );
+    meta.append(el("span", "where", m.buffer), el("span", undefined, m.sender), el("time", undefined, new Date(m.time_ms).toLocaleString(locale())));
     const snippet = el("div", "hit-snippet");
     for (const part of hit.snippet) {
       snippet.append(part.hit ? el("mark", undefined, part.text) : document.createTextNode(part.text));
@@ -787,7 +1175,7 @@ function renderHits(hits, query) {
     item.append(meta, snippet);
     list.append(item);
   });
-  $("search-count").textContent = `${hits.length}${hits.length >= 50 ? "+" : ""} result${hits.length === 1 ? "" : "s"}`;
+  $("search-count").textContent = tn("search.count", hits.length, { plus: hits.length >= 50 ? "+" : "" });
   selectHit(0);
 }
 
@@ -814,6 +1202,8 @@ async function openHit(hit) {
   const buffer = ensureBuffer(net, m.buffer);
   try {
     const context = await api.around(m.id, 30);
+    const previous = activeBuffer(state);
+    if (previous && !isActive(m.network, buffer.key)) markReadNow(state.active.network, previous);
     setActive(state, m.network, buffer.key);
     showContext(buffer, context, m.id);
     renderAll({ scroll: "target" });
@@ -832,6 +1222,12 @@ async function backToLive() {
 
 // ---- wiring --------------------------------------------------------------
 
+function setWindowFocus(focused) {
+  const buffer = setFocused(state, focused);
+  renderSidebar();
+  if (buffer && state.active) scheduleMarkRead(state.active.network, buffer, 200);
+}
+
 function bindEvents() {
   // A link must never navigate the application window, whatever it is and
   // however it was activated. This runs first, for every anchor on the page.
@@ -848,10 +1244,20 @@ function bindEvents() {
   );
   document.addEventListener("auxclick", (event) => event.target.closest?.("a[href]") && event.preventDefault(), true);
 
+  window.addEventListener("focus", () => setWindowFocus(true));
+  window.addEventListener("blur", () => setWindowFocus(false));
+  document.addEventListener("visibilitychange", () => setWindowFocus(!document.hidden && document.hasFocus()));
+
   $("buffer-list").addEventListener("click", (event) => {
     const target = event.target.closest("button");
     if (!target) return;
     const { network, key, action } = target.dataset;
+    if (action === "collapse") {
+      const net = state.networks.get(network);
+      net.collapsed = !net.collapsed;
+      renderSidebar();
+      return;
+    }
     if (action === "connect") return void connectProfile(network);
     if (action === "disconnect") return void api.disconnect(network).catch(fail);
     if (action === "close") {
@@ -933,21 +1339,24 @@ function bindEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    const command = event.ctrlKey || event.metaKey;
+    if (command && event.key.toLowerCase() === "k") {
       event.preventDefault();
       openSearch();
+    } else if (command && event.key === ",") {
+      event.preventDefault();
+      openSettings();
     } else if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
       cycleBuffer(event.key === "ArrowDown" ? 1 : -1);
     }
   });
 
-  $("btn-search").addEventListener("click", () => openSearch());
+  for (const id of ["btn-search", "btn-search-side"]) $(id).addEventListener("click", () => openSearch());
+  for (const id of ["btn-settings-side"]) $(id).addEventListener("click", openSettings);
   $("btn-networks").addEventListener("click", openNetworks);
-  $("btn-add-network").addEventListener("click", () => {
-    $("networks-dialog").close();
-    openProfileEditor(null);
-  });
+  $("btn-add-network").addEventListener("click", () => openProfileEditor(null));
+  $("welcome-add").addEventListener("click", () => openProfileEditor(null));
   $("btn-live").addEventListener("click", backToLive);
   $("toggle-sidebar").addEventListener("click", () => document.body.classList.toggle("show-sidebar"));
   $("toggle-members").addEventListener("click", () => {
@@ -966,6 +1375,7 @@ function bindEvents() {
     saveProfileFromForm();
   });
   $("btn-profile-cancel").addEventListener("click", () => $("profile-dialog").close());
+  $("p-preset").addEventListener("change", () => applyPreset(PRESETS.find((p) => p.id === $("p-preset").value)));
 
   // Search
   const debounced = () => {
@@ -993,6 +1403,8 @@ function bindEvents() {
     if (item) openHit(search.hits[Number(item.dataset.index)]);
   });
 
+  bindSettings();
+
   // While reconnecting, keep the countdown honest.
   setInterval(() => {
     const net = activeNet();
@@ -1000,8 +1412,26 @@ function bindEvents() {
   }, 1000);
 }
 
+// Connects the networks marked to connect at startup, a moment apart so they
+// do not all open at the same instant.
+function autoconnect() {
+  profiles
+    .filter((p) => p.autoconnect)
+    .forEach((p, index) => setTimeout(() => connectProfile(p.id, { auto: true }), 250 * index));
+}
+
 async function init() {
+  state.focused = document.hasFocus();
   bindEvents();
+
+  try {
+    settings = { ...settings, ...(await api.getSettings()) };
+  } catch (error) {
+    fail(error);
+  }
+  buildSettingsControls();
+  applySettings({}, { rerender: false });
+
   await api.onEvent(onEnvelope);
   try {
     const notices = await api.startupNotices();
@@ -1009,17 +1439,25 @@ async function init() {
   } catch {
     // Not fatal: the notices are informational.
   }
+
   await refreshProfiles();
+  await loadKnownBuffers();
   if (profiles.length === 0) {
     renderAll();
-    openProfileEditor(null);
     return;
   }
   const first = state.networks.values().next().value;
   await activate(first.id, SERVER);
+  autoconnect();
 }
 
-// Exposed for the demo's automated checks; harmless in the application.
-window.__rhizome = { state, api };
+// Exposed for automated checks; harmless in the application.
+window.__rhizome = {
+  state,
+  api,
+  settings: () => settings,
+  language,
+  setFocus: setWindowFocus,
+};
 
 init().catch(fail);

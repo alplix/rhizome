@@ -130,7 +130,7 @@ const RHIZOME_LINES = [
   "the wiki page (https://en.wikipedia.org/wiki/Rust_(programming_language)) covers it.",
   "SASL PLAIN over TLS only, never over plaintext",
   "reconnect uses backoff with jitter so a netsplit does not stampede the server",
-  "I pasted the log: kmalloc_array(n, size, GFP_KERNEL) returned NULL again",
+  "I pasted the log: `kmalloc_array(n, size, GFP_KERNEL)` returned NULL again",
   "does the token bucket allow a burst of five then one per second?",
   "cursor paging beats offset paging when messages arrive while you scroll",
   "Türkçe karakterler: ç ğ ı ö ş ü — hepsi doğru görünüyor mu?",
@@ -142,9 +142,13 @@ const KERNEL_LINES = [
   "did you enable KASAN? it usually points straight at the bad access",
   "bisecting now, the regression is somewhere in the 6.9 merge window",
   "that oops is in the driver, not the scheduler",
-  "you can reproduce it with kmalloc_array and a size of zero",
+  "you can reproduce it with `kmalloc_array` and a size of zero",
   "patch posted to the list: https://lore.kernel.org/lkml/20260925.1234@example/",
 ];
+
+// Packs an event the way the real backend does, so the demo history and the
+// live lines take the same shape.
+const eventRow = (over) => ({ kind: "event", spans: [], plain: "", highlight: false, ...over });
 
 function seedHistory(network, now) {
   const rand = lcg(42);
@@ -165,26 +169,42 @@ function seedHistory(network, now) {
       msgid: `demo-${id}`,
       ...extra,
     });
+  const addEvent = (buffer, sender, verb, args, time_ms, own = false) =>
+    rows.push({ id: id++, network, buffer, sender, time_ms, own, ...eventRow({ event: { verb, args } }) });
 
   for (const [buffer, lines] of [["#rhizome", RHIZOME_LINES], ["#kernel", KERNEL_LINES]]) {
     let t = now - 3 * 24 * 3600 * 1000;
+    addEvent(buffer, "alp", "join", [], t - 1000, true);
     for (let i = 0; i < 140; i += 1) {
       t += Math.floor(rand() * 40 * 60 * 1000) + 30_000;
+      const roll = rand();
+      if (roll < 0.06) {
+        addEvent(buffer, PEOPLE[Math.floor(rand() * PEOPLE.length)], "join", [], t);
+      } else if (roll < 0.1) {
+        addEvent(buffer, PEOPLE[Math.floor(rand() * PEOPLE.length)], "quit", ["Ping timeout: 240 seconds"], t);
+      }
       const sender = rand() < 0.15 ? "alp" : PEOPLE[Math.floor(rand() * PEOPLE.length)];
       const text = lines[Math.floor(rand() * lines.length)];
-      add(buffer, sender, `${text}`, t, { highlight: false });
+      add(buffer, sender, `${text}`, t + 1);
     }
   }
   const t = now - 2 * 3600 * 1000;
+  addEvent("#rhizome", "op", "topic", ["Rhizome, a modern IRC client"], t - 60_000);
   add("#rhizome", "eve", '<img src=x onerror=alert(1)> <script>alert(2)</script> <b>not bold</b>', t + 1);
   add("#rhizome", "mert", "javascript:alert(1) file:///C:/Windows/System32/calc.exe ms-msdt:/id and the real one https://example.com/ok.", t + 2);
   add("#rhizome", "bob", "alp: did you capture the \x02backtrace\x02 for the oops?", t + 3, { highlight: true });
   add("#rhizome", "carol", "facepalms at the backtrace", t + 4, { kind: "action", spans: [{ text: "facepalms at the backtrace" }] });
   add("#rhizome", "zeynep", "an unbroken token: " + "x".repeat(180), t + 5);
   add("#rhizome", "dave", "a long sentence that keeps going " + "and going ".repeat(40) + "until it has to wrap.", t + 6);
+  addEvent("#rhizome", "kernelhacker", "kick", ["eve", "off-topic"], t + 7);
   add("dave", "dave", "psst, check the backtrace I mailed you", now - 90 * 60 * 1000, { highlight: true });
   return { rows, nextId: id };
 }
+
+const DEFAULT_SETTINGS = {
+  theme: "system", accent: "theme", density: "comfortable", font_size: "medium",
+  language: "auto", time_format: "24h", show_events: true, notifications: true,
+};
 
 export function createMock() {
   const NETWORK = "demo";
@@ -195,10 +215,26 @@ export function createMock() {
   let nextId = seeded.nextId;
   let timers = [];
   const running = new Set();
+  const saved = new Map(); // remembered passwords, by network id
+
+  // How far each conversation has been read, by folded name.
+  const readMs = new Map([
+    ["#rhizome", now - 100 * 60 * 1000],
+    ["#kernel", now],
+    ["dave", now - 2 * 3600 * 1000],
+  ]);
+
+  let settings = { ...DEFAULT_SETTINGS };
+  try {
+    const stored = JSON.parse(localStorage.getItem("rhizome-mock-settings") ?? "null");
+    if (stored && typeof stored === "object") settings = { ...settings, ...stored };
+  } catch {
+    // Settings simply are not remembered in this browser.
+  }
 
   const profiles = [
-    { id: "demo", name: "Demo network", host: "irc.demo.invalid", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome", "#kernel"], sasl_account: null },
-    { id: "libera", name: "Libera.Chat", host: "irc.libera.chat", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome"], sasl_account: "alp" },
+    { id: "demo", name: "Demo network", host: "irc.demo.invalid", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome", "#kernel"], sasl_account: null, autoconnect: false },
+    { id: "libera", name: "Libera.Chat", host: "irc.libera.chat", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome"], sasl_account: "alp", autoconnect: false },
   ];
 
   const emit = (network, event) => {
@@ -230,6 +266,14 @@ export function createMock() {
     emit(NETWORK, { type: "message", message });
   }
 
+  // Something that happened: logged and shown as the same line, like the real backend.
+  function happen(buffer, sender, verb, args = [], own = false) {
+    const row = { id: nextId++, network: NETWORK, buffer, sender, time_ms: Date.now(), own, ...eventRow({ event: { verb, args } }) };
+    log.push(row);
+    const { id, ...message } = row;
+    emit(NETWORK, { type: "message", message });
+  }
+
   const members = {
     "#rhizome": [{ nick: "alp", prefixes: "@" }, { nick: "bob", prefixes: "+" }, { nick: "carol", prefixes: "" }, { nick: "dave", prefixes: "" }, { nick: "eve", prefixes: "" }, { nick: "mert", prefixes: "" }, { nick: "zeynep", prefixes: "" }],
     "#kernel": [{ nick: "alp", prefixes: "" }, { nick: "kernelhacker", prefixes: "@" }, { nick: "bob", prefixes: "" }],
@@ -237,6 +281,7 @@ export function createMock() {
 
   function join(channel) {
     emit(NETWORK, { type: "joined", channel });
+    happen(channel, "alp", "join", [], true);
     emit(NETWORK, { type: "topic", channel, topic: channel === "#kernel" ? "Kernel talk | oops reports welcome" : "Rhizome, a modern IRC client | https://github.com/alplix/rhizome" });
     emit(NETWORK, { type: "names", channel, members: members[channel] ?? [{ nick: "alp", prefixes: "" }] });
   }
@@ -248,6 +293,17 @@ export function createMock() {
         if (!running.has(NETWORK)) return;
         const channel = Math.random() < 0.6 ? "#rhizome" : "#kernel";
         const sender = PEOPLE[Math.floor(Math.random() * PEOPLE.length)];
+        const roll = Math.random();
+        if (roll < 0.12) {
+          emit(NETWORK, { type: "member_joined", channel, nick: "guest42" });
+          happen(channel, "guest42", "join");
+          return;
+        }
+        if (roll < 0.2) {
+          emit(NETWORK, { type: "member_parted", channel, nick: "guest42", reason: "later" });
+          happen(channel, "guest42", "part", ["later"]);
+          return;
+        }
         const text = Math.random() < 0.15 ? `alp: ${lines[Math.floor(Math.random() * lines.length)]}` : lines[Math.floor(Math.random() * lines.length)];
         say(channel, sender, text, { highlight: text.startsWith("alp:") });
       }, 7000),
@@ -264,32 +320,58 @@ export function createMock() {
 
   const key = (b) => fold(b);
   const byTime = (a, b) => a.time_ms - b.time_ms || a.id - b.id;
+  const isChat = (r) => r.kind !== "event";
 
   return {
     mode: "mock",
     startupNotices: async () => ["You are looking at demo data: this page is not running inside the Rhizome application."],
+    appInfo: async () => ({ name: "Rhizome", version: "demo", license: "GPL-3.0-or-later", data_dir: "(demo: nothing is saved)" }),
+    getSettings: async () => structuredClone(settings),
+    saveSettings: async (next) => {
+      settings = { ...settings, ...structuredClone(next) };
+      try {
+        localStorage.setItem("rhizome-mock-settings", JSON.stringify(settings));
+      } catch {
+        // Not remembered; fine for a demo.
+      }
+    },
     listProfiles: async () => structuredClone(profiles),
     saveProfile: async (profile) => {
       if (!profile.id || !profile.host || !profile.nick) throw new Error("the profile is incomplete");
       const i = profiles.findIndex((p) => p.id === profile.id);
       if (i === -1) profiles.push(structuredClone(profile));
-      else profiles[i] = structuredClone(profile);
+      else {
+        if (profiles[i].sasl_account !== profile.sasl_account) saved.delete(profile.id);
+        profiles[i] = structuredClone(profile);
+      }
     },
     deleteProfile: async (id) => {
       const i = profiles.findIndex((p) => p.id === id);
       if (i !== -1) profiles.splice(i, 1);
+      saved.delete(id);
     },
+    hasSavedPassword: async (id) => saved.has(id),
+    forgetPassword: async (id) => void saved.delete(id),
 
-    connect: async (id, password) => {
+    connect: async (id, password, remember = false) => {
       const profile = profiles.find((p) => p.id === id);
       if (!profile) throw new Error(`there is no saved network called ${id}`);
-      if (profile.sasl_account && !password) throw new Error(`the password for ${profile.sasl_account} is needed to log in`);
+      let pw = password;
+      if (profile.sasl_account) {
+        if (!pw && saved.has(id)) pw = saved.get(id);
+        else if (pw) {
+          if (remember) saved.set(id, pw);
+          else saved.delete(id);
+        }
+        if (!pw) throw new Error(`the password for ${profile.sasl_account} is needed to log in`);
+      }
       if (running.has(id)) throw new Error(`${id} is already connected`);
       later(0, () => emit(id, { type: "connecting" }));
       later(250, () => emit(id, { type: "connected" }));
-      if (password === "wrong") {
+      if (pw === "wrong") {
         later(600, () => {
-          emit(id, { type: "auth_failed", reason: "SASL authentication failed (904)" });
+          const forgot = saved.delete(id);
+          emit(id, { type: "auth_failed", reason: "SASL authentication failed (904)", forgot_password: forgot });
           emit(id, { type: "disconnected", reason: "SASL authentication failed (904)" });
           emit(id, { type: "closed" });
         });
@@ -322,7 +404,10 @@ export function createMock() {
       if (!running.has(network)) throw new Error(`${network} is not connected`);
       for (const c of channels) join(c);
     },
-    part: async (network, channel) => emit(network, { type: "parted", channel }),
+    part: async (network, channel) => {
+      emit(network, { type: "parted", channel });
+      happen(channel, "alp", "part", [""], true);
+    },
     setNick: async (network, nick) => emit(network, { type: "nick_changed", old: "alp", new: nick, channels: Object.keys(members), own: true }),
     raw: async (network, line) => emit(network, { type: "server", text: `(demo) sent: ${line}` }),
 
@@ -338,11 +423,34 @@ export function createMock() {
       const i = rows.findIndex((r) => r.id === id);
       return structuredClone(rows.slice(Math.max(0, i - radius), i + radius + 1));
     },
-    buffers: async () => [{ name: "dave", messages: log.filter((r) => r.buffer === "dave").length, last_time_ms: now }],
+    buffers: async () => {
+      const names = [...new Set(log.map((r) => r.buffer))];
+      return names.map((name) => {
+        const rows = log.filter((r) => key(r.buffer) === key(name) && isChat(r));
+        const since = readMs.get(key(name)) ?? 0;
+        const unread = rows.filter((r) => !r.own && r.time_ms > since);
+        return {
+          name,
+          messages: rows.length,
+          last_time_ms: rows.length ? Math.max(...rows.map((r) => r.time_ms)) : null,
+          unread: unread.length,
+          highlights: unread.filter((r) => r.highlight).length,
+        };
+      });
+    },
+    markRead: async (network, buffer, timeMs) => {
+      readMs.set(key(buffer), Math.max(readMs.get(key(buffer)) ?? 0, timeMs));
+    },
+    clearHistory: async (network, buffer) => {
+      const before = log.length;
+      for (let i = log.length - 1; i >= 0; i -= 1) if (key(log[i].buffer) === key(buffer)) log.splice(i, 1);
+      return before - log.length;
+    },
     search: async (query, network, newestFirst, limit) => {
       const q = parseQuery(query);
       if (q.terms.length === 0 && !q.from && !q.buffer) return [];
       const hits = log.filter((r) => {
+        if (!isChat(r)) return false;
         if (q.from && normal(r.sender) !== normal(q.from)) return false;
         if (q.buffer && key(r.buffer) !== key(q.buffer)) return false;
         const hay = normal(r.plain);
@@ -356,6 +464,10 @@ export function createMock() {
       if (!/^https?:\/\/[^\s/]+/i.test(url)) throw new Error("only http and https addresses can be opened");
       console.info("[demo] would open in the system browser:", url);
       window.__lastOpenedUrl = url;
+    },
+    notify: async (title, body) => {
+      (window.__notifications ??= []).push({ title, body });
+      return true;
     },
     onEvent: async (callback) => {
       listeners.add(callback);

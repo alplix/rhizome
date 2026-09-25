@@ -10,10 +10,16 @@ function tauriApi() {
   return {
     mode: "tauri",
     startupNotices: () => invoke("startup_notices"),
+    appInfo: () => invoke("app_info"),
+    getSettings: () => invoke("get_settings"),
+    saveSettings: (settings) => invoke("save_settings", { settings }),
     listProfiles: () => invoke("list_profiles"),
     saveProfile: (profile) => invoke("save_profile", { profile }),
     deleteProfile: (id) => invoke("delete_profile", { id }),
-    connect: (id, saslPassword) => invoke("connect", { id, saslPassword: saslPassword ?? null }),
+    hasSavedPassword: (id) => invoke("has_saved_password", { id }),
+    forgetPassword: (id) => invoke("forget_password", { id }),
+    connect: (id, saslPassword, remember = false) =>
+      invoke("connect", { id, saslPassword: saslPassword ?? null, remember }),
     disconnect: (id) => invoke("disconnect", { id }),
     sendMessage: (network, target, text, kind = "privmsg") => invoke("send_message", { network, target, text, kind }),
     join: (network, channels) => invoke("join", { network, channels }),
@@ -26,7 +32,20 @@ function tauriApi() {
       invoke("search", { query, network: network ?? null, newestFirst, limit }),
     around: (id, radius) => invoke("around", { id, radius }),
     buffers: (network) => invoke("buffers", { network }),
+    markRead: (network, buffer, timeMs) => invoke("mark_read", { network, buffer, timeMs }),
+    clearHistory: (network, buffer) => invoke("clear_history", { network, buffer }),
     openUrl: (url) => invoke("open_url", { url }),
+    // Shows a desktop notification, asking for permission the first time.
+    // Resolves to whether one was shown.
+    notify: async (title, body) => {
+      const notification = window.__TAURI__.notification;
+      if (!notification) return false;
+      let granted = await notification.isPermissionGranted();
+      if (!granted) granted = (await notification.requestPermission()) === "granted";
+      if (!granted) return false;
+      notification.sendNotification({ title, body });
+      return true;
+    },
     // Resolves to a function that stops listening.
     onEvent: (callback) => listen("rhizome://event", (event) => callback(event.payload)),
   };

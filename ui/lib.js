@@ -87,6 +87,24 @@ export function linkify(text) {
   return segments;
 }
 
+// ---- inline code -----------------------------------------------------------
+
+// Splits text at `backtick` spans, as developers write code in chat:
+// [{ text }, { text, code: true }, ...]. The backticks themselves are dropped.
+// An unmatched backtick, or one with nothing between a pair, is ordinary text,
+// and a span never crosses a line break.
+export function splitInlineCode(text) {
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index) });
+    parts.push({ text: match[1], code: true });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
 // ---- colour ----------------------------------------------------------------
 
 function parseHex(hex) {
@@ -147,9 +165,11 @@ export function nickHue(nick) {
 
 const pad = (n) => String(n).padStart(2, "0");
 
-export function formatTime(ms) {
+// `hour12` shows "9:05 PM" instead of "21:05".
+export function formatTime(ms, hour12 = false) {
   const d = new Date(ms);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (!hour12) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getHours() % 12 || 12}:${pad(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
 }
 
 export function sameDay(a, b) {
@@ -157,8 +177,9 @@ export function sameDay(a, b) {
   return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
 }
 
-export function formatDay(ms) {
-  return new Date(ms).toLocaleDateString(undefined, {
+// `locale` is a BCP 47 tag such as "tr-TR"; undefined uses the browser's own.
+export function formatDay(ms, locale) {
+  return new Date(ms).toLocaleDateString(locale, {
     weekday: "long",
     day: "numeric",
     month: "long",
@@ -168,18 +189,20 @@ export function formatDay(ms) {
 
 // ---- what the person typed -------------------------------------------------
 
+// The commands, for /help: [what to type, translation key of what it does].
 export const HELP = [
-  "/join #channel[,#other]     join channels",
-  "/part [#channel] [reason]   leave a channel",
-  "/me text                    an action",
-  "/msg nick text              a private message",
-  "/nick newnick               change nick",
-  "/topic [text]               show or set the topic",
-  "/whois nick                 look someone up",
-  "/search words               search the log (or Ctrl+K)",
-  "/quit                       disconnect from this network",
-  "/raw LINE                   send a raw IRC line",
-  "//text                      send a message that starts with /",
+  ["/join #channel[,#other]", "help.join"],
+  ["/part [#channel] [reason]", "help.part"],
+  ["/me text", "help.me"],
+  ["/msg nick text", "help.msg"],
+  ["/nick newnick", "help.nick"],
+  ["/topic [text]", "help.topic"],
+  ["/whois nick", "help.whois"],
+  ["/search words", "help.search"],
+  ["/clear", "help.clear"],
+  ["/quit", "help.quit"],
+  ["/raw LINE", "help.raw"],
+  ["//text", "help.escape"],
 ];
 
 // Turns a line the person typed into an action. `context` is
@@ -198,7 +221,10 @@ export function parseInput(line, context = {}) {
   const command = name.toLowerCase();
   const args = rest.trim();
   const words = args === "" ? [] : args.split(/\s+/);
-  const need = (usage) => ({ type: "error", text: `usage: ${usage}` });
+  // Errors carry a translation key and its parameters, never prose, so the
+  // interface can say them in the person's language.
+  const need = (usage) => ({ type: "error", key: "err.usage", params: { usage } });
+  const channelOnly = (command) => ({ type: "error", key: "err.channel_only", params: { command } });
   const inBuffer = context.buffer && context.buffer !== "*";
 
   switch (command) {
@@ -215,7 +241,7 @@ export function parseInput(line, context = {}) {
       return { type: "part", channel: context.buffer, reason: args || null };
     }
     case "me":
-      return args === "" ? need("/me does something") : { type: "action", text: args };
+      return args === "" ? need("/me text") : { type: "action", text: args };
     case "msg":
     case "query":
     case "m": {
@@ -240,15 +266,16 @@ export function parseInput(line, context = {}) {
     case "find":
       return { type: "search", query: args };
     case "topic":
-      if (!inBuffer || !context.isChannel) return need("/topic (in a channel)");
+      if (!inBuffer || !context.isChannel) return channelOnly("/topic");
       return { type: "raw", line: args === "" ? `TOPIC ${context.buffer}` : `TOPIC ${context.buffer} :${args}` };
     case "whois":
       return words.length === 1 ? { type: "raw", line: `WHOIS ${words[0]}` } : need("/whois nick");
     case "names":
-      if (!inBuffer || !context.isChannel) return need("/names (in a channel)");
+      if (!inBuffer || !context.isChannel) return channelOnly("/names");
       return { type: "raw", line: `NAMES ${context.buffer}` };
     case "kick": {
-      if (!inBuffer || !context.isChannel || words.length === 0) return need("/kick nick [reason] (in a channel)");
+      if (!inBuffer || !context.isChannel) return channelOnly("/kick");
+      if (words.length === 0) return need("/kick nick [reason]");
       const reason = args.slice(words[0].length).trim();
       return { type: "raw", line: reason ? `KICK ${context.buffer} ${words[0]} :${reason}` : `KICK ${context.buffer} ${words[0]}` };
     }
@@ -263,11 +290,15 @@ export function parseInput(line, context = {}) {
     }
     case "away":
       return { type: "raw", line: args === "" ? "AWAY" : `AWAY :${args}` };
+    case "clear":
+      return inBuffer
+        ? { type: "clear" }
+        : { type: "error", key: "err.conversation_only", params: { command: "/clear" } };
     case "help":
     case "?":
       return { type: "help" };
     default:
-      return { type: "error", text: `unknown command /${name} (type /help)` };
+      return { type: "error", key: "err.unknown_command", params: { name } };
   }
 }
 

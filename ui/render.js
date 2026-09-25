@@ -7,7 +7,18 @@
 // through the CSS object model, which the content security policy allows (unlike
 // a `style` attribute).
 
-import { formatDay, formatTime, linkify, nickHue, readableOn, sameDay } from "./lib.js";
+import { describeEvent } from "./events.js";
+import { t } from "./i18n.js";
+import { formatDay, formatTime, linkify, nickHue, readableOn, sameDay, splitInlineCode } from "./lib.js";
+
+// How times and days are written, set by the application from the person's
+// settings.
+const format = { hour12: false, locale: undefined };
+
+export function configureRender({ hour12, locale }) {
+  if (hour12 !== undefined) format.hour12 = hour12;
+  if (locale !== undefined) format.locale = locale;
+}
 
 export function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -30,10 +41,17 @@ function linkElement(segment) {
   return a;
 }
 
-// Appends text to `parent`, turning web addresses into links.
+// Appends text to `parent`: `code` in backticks becomes monospace, and web
+// addresses outside code become links.
 function appendText(parent, text) {
-  for (const segment of linkify(text)) {
-    parent.appendChild(segment.url ? linkElement(segment) : document.createTextNode(segment.text));
+  for (const piece of splitInlineCode(text)) {
+    if (piece.code) {
+      parent.appendChild(el("code", "inline-code", piece.text));
+      continue;
+    }
+    for (const segment of linkify(piece.text)) {
+      parent.appendChild(segment.url ? linkElement(segment) : document.createTextNode(segment.text));
+    }
   }
 }
 
@@ -65,14 +83,16 @@ export function renderSpans(spans) {
 }
 
 function timeElement(ms) {
-  const time = el("time", "time", formatTime(ms));
+  const time = el("time", "time", formatTime(ms, format.hour12));
   const date = new Date(ms);
   time.dateTime = date.toISOString();
-  time.title = date.toLocaleString();
+  time.title = date.toLocaleString(format.locale);
   return time;
 }
 
 export function renderMessageLine(message, { targetId } = {}) {
+  if (message.kind === "event") return renderEventLine(message, { targetId });
+
   const row = el("div", "line message");
   if (message.own) row.classList.add("own");
   if (message.highlight) row.classList.add("highlight");
@@ -98,6 +118,16 @@ export function renderMessageLine(message, { targetId } = {}) {
   return row;
 }
 
+// Something that happened, drawn quietly: a join, a part, a topic change.
+function renderEventLine(message, { targetId } = {}) {
+  const row = el("div", `line event ${message.event?.verb ?? ""}`);
+  if (message.id != null) row.dataset.id = String(message.id);
+  if (targetId != null && message.id === targetId) row.classList.add("target");
+  row.appendChild(timeElement(message.time_ms));
+  row.appendChild(el("span", "text", describeEvent(message)));
+  return row;
+}
+
 export function renderSystemLine(line) {
   const row = el("div", `line system ${line.level ?? "info"}`);
   row.appendChild(timeElement(line.time));
@@ -117,11 +147,11 @@ export function renderLines(lines, { unreadFrom = null, targetId = null, previou
     const time = lineTime(line);
     if (last === null || !sameDay(last, time)) {
       const day = el("div", "day");
-      day.appendChild(el("span", undefined, formatDay(time)));
+      day.appendChild(el("span", undefined, formatDay(time, format.locale)));
       fragment.appendChild(day);
     }
     if (unreadFrom !== null && index === unreadFrom) {
-      fragment.appendChild(el("div", "unread-marker", "New messages"));
+      fragment.appendChild(el("div", "unread-marker", t("messages.new_marker")));
     }
     fragment.appendChild(
       line.kind === "message" ? renderMessageLine(line.message, { targetId }) : renderSystemLine(line),

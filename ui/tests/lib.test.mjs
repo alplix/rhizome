@@ -173,7 +173,9 @@ test("a doubled slash sends a message that starts with a slash", () => {
 test("an unknown command is reported and never sent as chat", () => {
   const r = parseInput("/joinn #x", chan);
   assert.equal(r.type, "error");
-  assert.match(r.text, /unknown command \/joinn/);
+  // Errors are a translation key and its parameters, not prose.
+  assert.equal(r.key, "err.unknown_command");
+  assert.deepEqual(r.params, { name: "joinn" });
 });
 
 test("join takes one or several channels", () => {

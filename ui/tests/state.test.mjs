@@ -165,15 +165,17 @@ test("member matching follows the network's name folding", () => {
   assert.deepEqual(findBuffer(state, NET, "#c").members, []);
 });
 
-test("a nick change renames the member, keeps the prefix and notes it in shared channels only", () => {
+test("a nick change renames the member and keeps the prefix, in shared channels only", () => {
   const state = inChannel();
   ensureBuffer(state.networks.get(NET), "#other", "channel");
+  const before = channel(state).lines.length;
   send(state, { type: "nick_changed", old: "bob", new: "robert", channels: ["#rhizome"], own: false });
   const robert = channel(state).members.find((m) => m.nick === "robert");
   assert.equal(robert.prefixes, "+");
   assert.ok(!nicks(state).includes("bob"));
-  assert.ok(channel(state).lines.at(-1).text.includes("bob is now known as robert"));
-  assert.equal(findBuffer(state, NET, "#other").lines.length, 0);
+  // The line saying so comes from the backend as an event line, not from here.
+  assert.equal(channel(state).lines.length, before);
+  assert.equal(findBuffer(state, NET, "#other").members.length, 0);
 });
 
 test("our own nick change updates the network's nick", () => {
@@ -187,7 +189,7 @@ test("leaving or being kicked empties the channel", () => {
   send(state, { type: "kicked", channel: "#rhizome", by: "op", reason: "behave" });
   assert.equal(channel(state).joined, false);
   assert.deepEqual(channel(state).members, []);
-  assert.match(state.toast.text, /Removed from #rhizome/);
+  assert.match(state.toast.text, /op removed you from #rhizome/);
 
   const state2 = inChannel();
   send(state2, { type: "parted", channel: "#rhizome" });
@@ -340,9 +342,10 @@ test("merging history de-duplicates messages that have no id by time, sender and
 test("merging keeps system lines and interleaves them by time", () => {
   const state = createState();
   send(state, { type: "joined", channel: "#rhizome" }, NET, 150);
+  addSystem(state, NET, "#rhizome", "a note from the interface", "info", 150);
   mergeHistory(channel(state), [stored(1, 100), stored(2, 200)]);
   const order = channel(state).lines.map((l) => (l.kind === "message" ? l.message.plain : l.text));
-  assert.deepEqual(order, ["stored 1", "You joined #rhizome", "stored 2"]);
+  assert.deepEqual(order, ["stored 1", "a note from the interface", "stored 2"]);
 });
 
 test("a full page says there may be more history, a short one says there is not", () => {
@@ -414,8 +417,6 @@ test("formatting codes in topics, server text and reasons are not shown as contr
   send(state, { type: "server", text: "\x02Notice:\x02 maintenance" });
   const server = state.networks.get(NET).buffers.get(SERVER);
   assert.equal(server.lines.at(-1).text, "Notice: maintenance");
-  send(state, { type: "member_quit", nick: "bob", reason: "\x0304bye\x03", channels: ["#rhizome"] });
-  assert.match(channel(state).lines.at(-1).text, /quit \(bye\)/);
 });
 
 test("live lines do not join a search result window but still count as unread", () => {
@@ -434,4 +435,171 @@ test("live lines do not join a search result window but still count as unread", 
   chat(other, { msgid: "x", highlight: true });
   assert.equal(findBuffer(other, NET, "#rhizome").unread, 1);
   assert.equal(findBuffer(other, NET, "#rhizome").highlights, 1);
+});
+
+// ---- events as lines, focus, unread from the log --------------------------------
+
+import {
+  applyKnownBuffers,
+  clearBuffer,
+  lastChatTime,
+  markUnreadFrom,
+  setFocused,
+  dedupeKey,
+} from "../state.js";
+
+const eventLine = (verb, args = [], over = {}) =>
+  msg({ kind: "event", spans: [], plain: "", event: { verb, args }, sender: "carol", ...over });
+
+const eventIn = (state, verb, args, over) => send(state, { type: "message", message: eventLine(verb, args, over) });
+
+test("an event line is shown as a line but is never unread and never asks for attention", () => {
+  const state = inChannel();
+  setActive(state, NET, SERVER);
+  const before = channel(state).lines.length;
+  const effects = eventIn(state, "join", [], { time_ms: 5000 });
+
+  assert.equal(channel(state).lines.length, before + 1);
+  assert.equal(channel(state).unread, 0);
+  assert.deepEqual(effects, [], "no notification for a join");
+});
+
+test("a chat message from someone else raises an incoming effect, our own does not", () => {
+  const state = inChannel();
+  const other = chat(state, { msgid: "x1" });
+  assert.equal(other.length, 1);
+  assert.equal(other[0].type, "incoming");
+  assert.equal(other[0].message.plain, "hi");
+  assert.deepEqual(chat(state, { msgid: "x2", own: true }), []);
+});
+
+test("an event seen live and again from the log is one line", () => {
+  const state = inChannel();
+  const live = eventLine("part", ["later"], { time_ms: 9000 });
+  eventIn(state, "part", ["later"], { time_ms: 9000 });
+  mergeHistory(channel(state), [{ ...live, id: 3 }]);
+  const parts = channel(state).lines.filter((l) => l.kind === "message" && l.message.event?.verb === "part");
+  assert.equal(parts.length, 1);
+
+  // Different arguments are a different event.
+  assert.notEqual(
+    dedupeKey(eventLine("part", ["a"], { time_ms: 1 })),
+    dedupeKey(eventLine("part", ["b"], { time_ms: 1 })),
+  );
+});
+
+test("joins, parts and quits still keep the member list up to date without writing lines", () => {
+  const state = inChannel();
+  const before = channel(state).lines.length;
+  send(state, { type: "member_joined", channel: "#rhizome", nick: "dave" });
+  send(state, { type: "member_parted", channel: "#rhizome", nick: "carol", reason: "x" });
+  send(state, { type: "member_quit", nick: "bob", reason: "y", channels: ["#rhizome"] });
+  assert.deepEqual(nicks(state), ["alp", "dave"]);
+  assert.equal(channel(state).lines.length, before, "the backend supplies the lines");
+});
+
+test("the last chat time ignores events and the interface's own notes", () => {
+  const state = inChannel();
+  chat(state, { msgid: "a", time_ms: 100 });
+  eventIn(state, "join", [], { time_ms: 500 });
+  addSystem(state, NET, "#rhizome", "note", "info", 900);
+  assert.equal(lastChatTime(channel(state)), 100);
+  assert.equal(lastChatTime(findBuffer(state, NET, SERVER)), null);
+});
+
+test("a window that is not in front counts even the open conversation as unread", () => {
+  const state = inChannel();
+  setActive(state, NET, "#rhizome");
+  setFocused(state, false);
+  chat(state, { msgid: "away1" });
+  chat(state, { msgid: "away2", highlight: true });
+  assert.equal(channel(state).unread, 2);
+  assert.equal(channel(state).highlights, 1);
+
+  // Coming back reads it, and says which conversation to tell the log about.
+  const read = setFocused(state, true);
+  assert.equal(read, channel(state));
+  assert.equal(channel(state).unread, 0);
+  // Nothing to read the second time.
+  assert.equal(setFocused(state, true), null);
+});
+
+test("opening a conversation while the window is not in front does not read it", () => {
+  const state = inChannel();
+  setActive(state, NET, SERVER);
+  chat(state, { msgid: "m1" });
+  setFocused(state, false);
+  setActive(state, NET, "#rhizome");
+  assert.equal(channel(state).unread, 1, "nobody is looking");
+});
+
+test("the conversations the log knows about appear with their unread counts", () => {
+  const state = createState();
+  const net = ensureNetwork(state, NET, "Libera");
+  applyKnownBuffers(net, [
+    { name: "#rust", unread: 4, highlights: 1 },
+    { name: "dave", unread: 0, highlights: 0 },
+  ]);
+  assert.equal(findBuffer(state, NET, "#rust").kind, "channel");
+  assert.equal(findBuffer(state, NET, "#rust").unread, 4);
+  assert.equal(findBuffer(state, NET, "#rust").highlights, 1);
+  assert.equal(findBuffer(state, NET, "dave").kind, "query");
+});
+
+test("counts from the log do not overwrite counts from live messages", () => {
+  const state = createState();
+  const net = ensureNetwork(state, NET, "Libera");
+  chat(state, { buffer: "#live", msgid: "l1" });
+  chat(state, { buffer: "#live", msgid: "l2" });
+  applyKnownBuffers(net, [{ name: "#live", unread: 99, highlights: 9 }]);
+  assert.equal(findBuffer(state, NET, "#live").unread, 2);
+});
+
+test("the unread marker goes at the oldest unread message from someone else", () => {
+  const state = inChannel();
+  const buffer = channel(state);
+  mergeHistory(buffer, [
+    stored(1, 100),
+    stored(2, 200, { own: true }),
+    stored(3, 300),
+    eventLine("join", [], { id: 4, time_ms: 350 }),
+    stored(5, 400),
+    stored(6, 500),
+  ]);
+  markUnreadFrom(buffer, 2);
+  const at = buffer.lines[buffer.unreadFrom].message;
+  assert.equal(at.plain, "stored 5", "counting from the newest: 6, then 5");
+
+  markUnreadFrom(buffer, 3);
+  assert.equal(buffer.lines[buffer.unreadFrom].message.plain, "stored 3", "our own message and the event are skipped");
+
+  markUnreadFrom(buffer, 50);
+  assert.equal(buffer.unreadFrom, 0, "more unread than loaded: everything loaded is unread");
+
+  const empty = ensureBuffer(state.networks.get(NET), "#empty", "channel");
+  markUnreadFrom(empty, 3);
+  assert.equal(empty.unreadFrom, null);
+});
+
+test("clearing a conversation empties it and resets what it was tracking", () => {
+  const state = inChannel();
+  setActive(state, NET, SERVER);
+  chat(state, { msgid: "c1", highlight: true });
+  const buffer = channel(state);
+  assert.equal(buffer.unread, 1);
+  clearBuffer(buffer);
+  assert.deepEqual([buffer.lines.length, buffer.unread, buffer.highlights, buffer.unreadFrom], [0, 0, 0, null]);
+  assert.equal(buffer.hasMore, false, "there is nothing older left in the log");
+  // The same message could arrive again and be shown: the dedupe memory is gone.
+  chat(state, { msgid: "c1" });
+  assert.equal(buffer.lines.length, 1);
+});
+
+test("a failed login says the saved password was removed only when it was", () => {
+  const state = createState();
+  send(state, { type: "auth_failed", reason: "bad (904)", forgot_password: true });
+  assert.match(state.toast.text, /Login failed: bad \(904\)/);
+  assert.match(state.toast.text, /saved password was removed/);
+  send(state, { type: "auth_failed", reason: "bad (904)", forgot_password: false });
+  assert.doesNotMatch(state.toast.text, /saved password/);
 });
