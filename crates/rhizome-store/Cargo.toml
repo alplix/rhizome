@@ -1,0 +1,17 @@
+[package]
+name = "rhizome-store"
+description = "Message log and full-text search for Rhizome, on SQLite FTS5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rhizome-proto = { path = "../rhizome-proto" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+rhizome-client = { path = "../rhizome-client" }
+
+[lints]
+workspace = true

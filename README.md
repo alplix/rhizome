@@ -17,7 +17,7 @@ engine.
 |---|---|
 | `rhizome-proto` | ✅ Complete — 107 tests |
 | `rhizome-client` | ✅ Engine complete — 89 tests, verified live against Libera.Chat |
-| `rhizome-store` | ⬜ Not started — SQLite log with FTS5 search |
+| `rhizome-store` | ✅ Complete — 73 tests; message log and full-text search on SQLite FTS5 |
 | `rhizome-app` | ⬜ Not started — Tauri v2 shell |
 | `ui/` | ⬜ Not started — web frontend |
 
@@ -54,7 +54,8 @@ crates/
   rhizome-client/  registration, TLS, session state, rate limit,
                    reconnect. The state machine is sans-I/O; a thin
                    tokio driver wraps it.
-  rhizome-store/   SQLite message log and FTS5 search               (planned)
+  rhizome-store/   SQLite message log and FTS5 search. Independent of
+                   the engine: takes plain values, knows no sockets.
   rhizome-app/     Tauri commands and event stream                  (planned)
 ui/                web frontend                                     (planned)
 ```
@@ -111,6 +112,42 @@ including the trap where a base64 payload of exactly 400 bytes needs an empty
 continuation or the server waits for it forever, and the rule that `PLAIN` is
 never selected without TLS.
 
+## Search
+
+Every message is written to a local SQLite log and indexed with FTS5. The
+search box understands what a developer types:
+
+| You type | It means |
+|---|---|
+| `null pointer` | both words, anywhere, in any order |
+| `"null pointer"` | that exact phrase |
+| `kmall*` | any word starting with `kmall` |
+| `from:bob` | only messages from `bob` |
+| `in:#kernel` | only messages in `#kernel` |
+
+- **Nothing typed is a search error.** FTS5's own query language is never
+  exposed: every word is quoted as a literal, so a stray `"`, the word `AND`,
+  or `C++` cannot produce a syntax error. A half-typed `from:` is ignored
+  rather than searched for as text.
+- **Formatting codes are not part of a word.** A colour change in the middle of
+  `error` does not stop it matching, while the stored text keeps its codes so it
+  renders faithfully.
+- **`snake_case` identifiers stay whole,** so `kmalloc_array` does not also match
+  every message that merely mentions `array`. Use `kmalloc*` to match the family.
+- **Turkish is searchable without Turkish keys.** `dunya`, `turkce` and `cumleyi`
+  find `dünya`, `Türkçe` and `cümleyi`; capital `İ` matches `i`. One gap remains:
+  the dotless `ı` is a different letter, not an accented `i`, and is not folded,
+  so `hatayi` does not find `hatayı`. Typing `hatay*` does.
+- **History replays are idempotent.** A message with the same server-assigned
+  id in the same buffer is stored once, so reconnecting and re-fetching
+  overlapping history adds nothing.
+- **Paging is by cursor, not offset,** so messages arriving while you scroll
+  cannot shift a page and repeat or skip lines.
+
+What is logged today is chat text (messages, notices and `/me` actions).
+Joins, parts, quits and topic changes are reported by the engine but not yet
+stored, so a scrollback view will not show them.
+
 ## Safety properties
 
 - **No command injection.** Every outgoing line passes
@@ -142,7 +179,7 @@ cargo test
 A minimal terminal client is included:
 
 ```bash
-cargo run -p rhizome-client --example connect --     --nick my_nick --join "#rhizome"
+cargo run -p rhizome-client --example connect -- --nick my_nick --join "#rhizome"
 ```
 
 For a NickServ account, add `--sasl-user NAME` and put the password in the
@@ -151,10 +188,16 @@ argument, since those end up in shell history. Type text to talk in the current
 channel; `/join`, `/part`, `/me`, `/msg`, `/nick`, `/buf`, `/raw` and `/quit`
 are supported.
 
+That client does not write to the log yet; the two are joined in the desktop
+app. The store is exercised end to end by
+`crates/rhizome-store/tests/pipeline.rs`, which runs a server transcript through
+the real session into the store and back out through search.
+
 ## Next steps
 
-1. `rhizome-store`: SQLite schema and FTS5 index, fed from the `Event` stream.
-2. `rhizome-app` + `ui/`: the Tauri shell and the first usable window.
+1. `rhizome-app` + `ui/`: the Tauri shell and the first usable window, which
+   joins the engine to the store.
+2. Log joins, parts, quits and topics, and track read markers for unread counts.
 3. Client certificates for SASL `EXTERNAL`. The protocol layer already models
    it; the driver does not yet load a certificate.
 4. An opt-in way to accept a self-signed server certificate.
