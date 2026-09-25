@@ -120,8 +120,13 @@ cargo test
 4. Android target once the desktop MVP works — the shared core is already
    dependency-free, so this is a build-system task, not a rewrite.
 
+## Licence
+
+GPL-3.0-or-later, for every crate. See `LICENSE`.
+
 ## Open decisions
 
-- **Licence.** Not yet chosen.
 - **Android NDK.** Not installed; deferred until the desktop MVP runs.
-- **Bouncer.** Whether to standardise on soju running on the FreeBSD VM.
+- **Bouncer.** Optional. The client works standalone with its own local log;
+  a bouncer such as soju only matters for staying connected while the client
+  is closed.

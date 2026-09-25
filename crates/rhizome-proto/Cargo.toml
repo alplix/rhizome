@@ -4,6 +4,7 @@ description = "IRC line protocol: RFC 1459 framing, IRCv3 message-tags, ISUPPORT
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 
