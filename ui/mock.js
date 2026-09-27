@@ -234,8 +234,8 @@ export function createMock() {
   }
 
   const profiles = [
-    { id: "demo", name: "Demo network", host: "irc.demo.invalid", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome", "#kernel"], sasl_account: null, autoconnect: false },
-    { id: "libera", name: "Libera.Chat", host: "irc.libera.chat", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome"], sasl_account: "alp", autoconnect: false },
+    { id: "demo", name: "Demo network", host: "irc.demo.invalid", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome", "#kernel"], sasl_account: null, client_cert_path: null, autoconnect: false },
+    { id: "libera", name: "Libera.Chat", host: "irc.libera.chat", port: 6697, tls: true, nick: "alp", username: "alp", realname: "Alp", channels: ["#rhizome"], sasl_account: "alp", client_cert_path: null, autoconnect: false },
   ];
 
   const emit = (network, event) => {

@@ -959,7 +959,9 @@ async function renderProfileList() {
     list.append(el("li", "none", t("networks.none")));
     return;
   }
-  const remembered = await Promise.all(profiles.map((p) => (p.sasl_account ? api.hasSavedPassword(p.id).catch(() => false) : false)));
+  const remembered = await Promise.all(
+    profiles.map((p) => (p.sasl_account && !p.client_cert_path ? api.hasSavedPassword(p.id).catch(() => false) : false)),
+  );
   profiles.forEach((p, index) => {
     const net = state.networks.get(p.id);
     const item = el("li");
@@ -967,7 +969,8 @@ async function renderProfileList() {
     const title = el("strong", undefined, p.name);
     if (p.autoconnect) title.append(el("span", "tag", t("networks.auto")));
     const details = [`${p.host}:${p.port}${p.tls ? "" : ` ${t("networks.no_tls")}`}`, p.nick];
-    if (p.sasl_account) details.push(t("networks.account", { account: p.sasl_account }));
+    if (p.client_cert_path) details.push(t("networks.cert"));
+    else if (p.sasl_account) details.push(t("networks.account", { account: p.sasl_account }));
     info.append(title, el("span", undefined, details.join(" · ")));
     item.append(info);
 
@@ -1050,6 +1053,7 @@ function openProfileEditor(profile, preset = null) {
   $("p-realname").value = profile?.realname ?? "Rhizome";
   $("p-channels").value = (profile?.channels ?? []).join(", ");
   $("p-account").value = profile?.sasl_account ?? "";
+  $("p-cert").value = profile?.client_cert_path ?? "";
   $("p-autoconnect").checked = profile?.autoconnect ?? false;
   if (!profile) applyPreset(preset);
   $("profile-error").hidden = true;
@@ -1073,6 +1077,7 @@ async function saveProfileFromForm() {
     realname: $("p-realname").value.trim() || "Rhizome",
     channels: $("p-channels").value.split(/[\s,]+/).filter(Boolean),
     sasl_account: $("p-account").value.trim() || null,
+    client_cert_path: $("p-cert").value.trim() || null,
     autoconnect: $("p-autoconnect").checked,
   };
   try {
@@ -1119,7 +1124,7 @@ async function connectProfile(id, { auto = false } = {}) {
   if (!profile) return;
   let password = null;
   let remember = false;
-  if (profile.sasl_account) {
+  if (profile.sasl_account && !profile.client_cert_path) {
     const saved = await api.hasSavedPassword(id).catch(() => false);
     if (!saved) {
       if (auto) {
