@@ -796,6 +796,7 @@ mod tests {
             realname: "Alp".into(),
             channels: vec![],
             sasl_account: account.map(str::to_owned),
+            client_cert_path: None,
             autoconnect: false,
         }
     }

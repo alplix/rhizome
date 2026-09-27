@@ -320,6 +320,40 @@ def main():
         profiles = page.evaluate("window.__rhizome.api.listProfiles().then(p => p.map(x => x.id))")
         check("a saved profile can be listed back over IPC", profiles == ["e2e"], str(profiles))
 
+        # A client certificate profile: the path round-trips over IPC, and a
+        # real connection attempt really tries to read and parse that exact
+        # file — proving the wiring reaches the actual Rust code that will
+        # load it for SASL EXTERNAL, not just that the field is stored.
+        # (The mutual-TLS handshake itself is covered by real-socket tests in
+        # crates/rhizome-client/src/connection.rs; this is placeholder
+        # content, so parsing it is expected to fail, informatively.)
+        cert_path = Path(tempfile.mkstemp(prefix="rhizome-e2e-cert-")[1])
+        cert_path.write_text("not a real certificate, only its path is under test here")
+        try:
+            page.evaluate(
+                "window.__rhizome.api.saveProfile({id:'e2e-cert',name:'E2E cert',host:'127.0.0.1',port:1,tls:true,"
+                "nick:'alp',username:'alp',realname:'Rhizome',channels:[],sasl_account:null,"
+                "client_cert_path:%s,autoconnect:false})" % json.dumps(str(cert_path))
+            )
+            saved = page.evaluate(
+                "window.__rhizome.api.listProfiles().then(p => p.find(x => x.id === 'e2e-cert').client_cert_path)"
+            )
+            check("a client certificate path round-trips over IPC", saved == str(cert_path), saved)
+
+            error = page.evaluate("window.__rhizome.api.connect('e2e-cert', null).then(() => 'connected', e => String(e))")
+            check(
+                "connecting really tries to read and parse that certificate file",
+                "not usable" in error,
+                error,
+            )
+        finally:
+            for _ in range(10):
+                try:
+                    cert_path.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    time.sleep(0.3)
+
         page.evaluate("window.__rhizome.api.connect('e2e', null)")
         check("events reach the page and the network registers", wait_for(page, "window.__rhizome.state.networks.get('e2e')?.status === 'registered'"))
         check("the channel is joined and shown", wait_for(page, "window.__rhizome.state.networks.get('e2e')?.buffers.get('#e2e')?.joined === true"))

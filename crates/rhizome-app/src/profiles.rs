@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fsutil::write_atomic;
 
+use rhizome_client::identity::ClientCert;
 use rhizome_client::Config;
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +32,20 @@ pub struct Profile {
     pub realname: String,
     #[serde(default)]
     pub channels: Vec<String>,
-    /// The NickServ account to log in to with SASL. The password is not part
-    /// of the profile.
+    /// The NickServ account to log in to with SASL `PLAIN`, or the account to
+    /// act as with SASL `EXTERNAL` when it differs from the certificate's
+    /// (usually left empty, and only consulted when `client_cert_path` is
+    /// set — see there).
     #[serde(default)]
     pub sasl_account: Option<String>,
+    /// A PEM file holding a client certificate and its private key, for SASL
+    /// `EXTERNAL` — the "CertFP" a network's services usually document.
+    /// Nothing is stored from it here, only this path; the file is read
+    /// fresh on each connection attempt. Takes priority over `sasl_account`
+    /// as a password-based `PLAIN` login: a profile with both set still logs
+    /// in by certificate, not by password.
+    #[serde(default)]
+    pub client_cert_path: Option<String>,
     /// Connect to this network when the application starts. A network that
     /// needs a password only does so if one has been saved.
     #[serde(default)]
@@ -98,11 +109,18 @@ impl Profile {
                 return Err("the SASL account name is not valid".into());
             }
         }
+        if let Some(path) = &self.client_cert_path {
+            if path.is_empty() || has_bad_chars(path) {
+                return Err("the client certificate path is not valid".into());
+            }
+        }
         Ok(())
     }
 
-    /// Builds the engine's settings. A profile with a SASL account needs the
-    /// password supplied here, since it is not stored.
+    /// Builds the engine's settings. A profile with a SASL account and no
+    /// client certificate needs the password supplied here, since it is not
+    /// stored; one with a client certificate needs no password at all, and
+    /// the file is read fresh from `client_cert_path`.
     pub fn to_config(&self, sasl_password: Option<String>) -> Result<Config, String> {
         self.validate()?;
         let mut config = Config::new(&self.host, &self.nick)
@@ -111,7 +129,14 @@ impl Profile {
             .realname(&self.realname)
             .autojoin(self.channels.iter().cloned());
         config.tls = self.tls;
-        if let Some(account) = &self.sasl_account {
+        if let Some(path) = &self.client_cert_path {
+            let pem = fs::read(path)
+                .map_err(|e| format!("could not read the client certificate at {path}: {e}"))?;
+            let cert = ClientCert::from_pem(&pem)
+                .map_err(|e| format!("the client certificate at {path} is not usable: {e}"))?;
+            let authzid = self.sasl_account.clone().unwrap_or_default();
+            config = config.sasl_external(cert, authzid);
+        } else if let Some(account) = &self.sasl_account {
             match sasl_password {
                 Some(password) if !password.is_empty() => {
                     config = config.sasl_plain(account, password);
@@ -211,6 +236,7 @@ mod tests {
             realname: "Alp".into(),
             channels: vec!["#rhizome".into()],
             sasl_account: None,
+            client_cert_path: None,
             autoconnect: false,
         }
     }
@@ -343,6 +369,20 @@ mod tests {
                     ..profile()
                 },
             ),
+            (
+                "empty client certificate path",
+                Profile {
+                    client_cert_path: Some("".into()),
+                    ..profile()
+                },
+            ),
+            (
+                "client certificate path with a line break",
+                Profile {
+                    client_cert_path: Some("a\nQUIT".into()),
+                    ..profile()
+                },
+            ),
         ];
         for (label, p) in cases {
             assert!(p.validate().is_err(), "{label} should be rejected");
@@ -372,6 +412,59 @@ mod tests {
         assert_eq!(config.sasl.len(), 1);
         // And the password does not leak through Debug.
         assert!(!format!("{config:?}").contains("hunter2"));
+    }
+
+    /// A real certificate and key rhizome-client already generated for its
+    /// own SASL EXTERNAL tests, reused here rather than keeping a second
+    /// copy: see `crates/rhizome-client/testdata/README.md`.
+    const TEST_CLIENT_CERT: &str = include_str!("../../rhizome-client/testdata/client.crt");
+    const TEST_CLIENT_KEY: &str = include_str!("../../rhizome-client/testdata/client.key");
+
+    #[test]
+    fn a_client_certificate_logs_in_by_external_not_plain() {
+        let t = Temp::new("client-cert");
+        fs::create_dir_all(&t.0).unwrap();
+        let pem_path = t.0.join("client.pem");
+        fs::write(&pem_path, format!("{TEST_CLIENT_CERT}\n{TEST_CLIENT_KEY}")).unwrap();
+
+        let mut p = profile();
+        p.client_cert_path = Some(pem_path.display().to_string());
+        // Needs no password at all, even with a NickServ account set too...
+        let config = p.to_config(None).unwrap();
+        assert!(config.client_cert.is_some());
+        assert_eq!(
+            config.sasl,
+            vec![rhizome_proto::Mechanism::External {
+                authzid: String::new()
+            }]
+        );
+
+        // ...and a client certificate takes priority over a SASL account,
+        // used here only as the authzid rather than for a PLAIN login.
+        p.sasl_account = Some("services-account".into());
+        let config = p.to_config(None).unwrap();
+        assert_eq!(
+            config.sasl,
+            vec![rhizome_proto::Mechanism::External {
+                authzid: "services-account".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unusable_certificate_file_is_a_clear_error() {
+        let mut p = profile();
+        p.client_cert_path = Some("/no/such/file-at-all.pem".into());
+        let err = p.to_config(None).unwrap_err();
+        assert!(err.contains("could not read"), "{err}");
+
+        let t = Temp::new("bad-cert");
+        fs::create_dir_all(&t.0).unwrap();
+        let garbage_path = t.0.join("garbage.pem");
+        fs::write(&garbage_path, "this is not a PEM file at all").unwrap();
+        p.client_cert_path = Some(garbage_path.display().to_string());
+        let err = p.to_config(None).unwrap_err();
+        assert!(err.contains("not usable"), "{err}");
     }
 
     #[test]
