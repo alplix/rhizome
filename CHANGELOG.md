@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 [Semantic Versioning](https://semver.org/) once 1.0 is reached; until then a
 minor version may change things.
 
+## [0.6.1] — 2026-09-27
+
+### Fixed
+- Sending a message to a channel you have not actually joined yet (or have
+  since left) is now refused locally, immediately, with a plain "you have not
+  joined #channel" — instead of going out anyway and coming back, a moment
+  later, as the server's own cryptic `ERR_CANNOTSENDTOCHAN` numeric.
+- Clicking Connect on a network that is already connected, still connecting,
+  or waiting to retry after a drop no longer bounces back the backend's own
+  raw `"<id> is already connected"` text. It now says which of those is
+  actually happening, in the interface's own language. This is the ordinary
+  result of `autoconnect` having already done its job — not a sign anything
+  is broken — but it was easy to mistake for one, especially paired with a
+  profile that has no channels configured: it connects successfully to a
+  server buffer with nothing in it, which looks like nothing happened at
+  all. Add a channel to the profile, or `/join` one by hand, either connects
+  or already-connected.
+
 ## [0.6.0] — 2026-09-27
 
 ### Added

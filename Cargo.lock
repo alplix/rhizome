@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "rhizome-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "keyring",
  "rhizome-client",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "rhizome-client"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "rhizome-proto",
  "rustls",
@@ -3191,11 +3191,11 @@ dependencies = [
 
 [[package]]
 name = "rhizome-proto"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "rhizome-store"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "rhizome-client",
  "rhizome-proto",

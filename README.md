@@ -211,13 +211,21 @@ and never raise a notification.
   front; switchable in Settings.
 - **Autoconnect** per network, and **Remember password**, which stores it in the
   operating system's credential store (Windows Credential Manager). It is never
-  written to a file in the data directory, and a failed login deletes it.
+  written to a file in the data directory, and a failed login deletes it. A
+  network with autoconnect on and no channels configured connects silently to
+  an empty server buffer — which can look like nothing happened. Add a
+  channel to the profile, or `/join` one by hand.
+  Clicking Connect on a network that turns out to already be connected,
+  connecting, or waiting to retry says which of those it actually is, rather
+  than just bouncing back the server's own "already connected".
 - **Search (Ctrl+K)** over everything logged, across networks or in one, by best
   match or newest. Opening a result shows it in its conversation, with a way back
   to the live end.
 - **Typing:** Tab completes nicks, ↑ recalls what you sent, `/help` lists the
   commands (including `/clear`). A typo such as `/joinn` is reported, never
-  posted as chat.
+  posted as chat, and so is trying to send to a channel you have not actually
+  joined yet — rather than waiting on a round trip to the server to hear back
+  `ERR_CANNOTSENDTOCHAN`.
 - **Pasting** more than three lines asks first, and each line then goes out as its
   own message under the rate limit.
 - **IRC colours stay readable:** colours chosen for a white or black page are
