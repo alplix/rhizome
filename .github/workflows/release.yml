@@ -80,4 +80,9 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*/*
+          files: |
+            dist/**/*.exe
+            dist/**/*.dmg
+            dist/**/*.deb
+            dist/**/*.AppImage
+            dist/**/*.sha256
