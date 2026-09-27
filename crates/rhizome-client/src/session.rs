@@ -1018,6 +1018,21 @@ impl Session {
             Err(e) => Output::error(format!("not a valid IRC line: {e}")),
         }
     }
+
+    /// Sends a CTCP request or reply of our own asking, such as a `DCC SEND`
+    /// offer. Like a CTCP reply, this is never echoed locally as a chat
+    /// message — the body is control characters and parameters, not
+    /// something to show in a conversation.
+    pub fn send_ctcp(&mut self, target: &str, command: &str, params: Option<&str>) -> Output {
+        if target.is_empty() || target.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Output::error(format!("invalid message target {target:?}"));
+        }
+        let body = ctcp::build(command, params);
+        Output {
+            send: vec![Message::with_body("PRIVMSG", target, &body)],
+            events: Vec::new(),
+        }
+    }
 }
 
 /// Whether a value can be used as a single bare parameter: non-empty, with no
@@ -1850,6 +1865,32 @@ mod tests {
             &s.raw("@only-tags").events[0],
             Event::Error { .. }
         ));
+    }
+
+    #[test]
+    fn a_ctcp_request_of_our_own_is_sent_and_never_echoed() {
+        let (mut s, _) = registered(cfg(), "");
+        let out = s.send_ctcp("bob", "DCC", Some("SEND report.pdf 3232235777 5000 1024"));
+        assert_eq!(
+            sent(&out),
+            vec!["PRIVMSG bob :\u{1}DCC SEND report.pdf 3232235777 5000 1024\u{1}"]
+        );
+        assert!(out.events.is_empty(), "a DCC offer is not a chat message");
+    }
+
+    #[test]
+    fn a_ctcp_request_with_no_parameters_still_wraps_correctly() {
+        let (mut s, _) = registered(cfg(), "");
+        let out = s.send_ctcp("bob", "PING", None);
+        assert_eq!(sent(&out), vec!["PRIVMSG bob :\u{1}PING\u{1}"]);
+    }
+
+    #[test]
+    fn an_invalid_ctcp_target_is_refused() {
+        let (mut s, _) = registered(cfg(), "");
+        let out = s.send_ctcp("bob smith", "DCC", Some("x"));
+        assert!(sent(&out).is_empty());
+        assert!(matches!(&out.events[0], Event::Error { .. }));
     }
 
     #[test]

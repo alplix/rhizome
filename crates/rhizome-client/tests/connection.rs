@@ -405,6 +405,49 @@ async fn a_quit_delivers_the_messages_sent_just_before_it() {
 }
 
 #[tokio::test]
+async fn a_dcc_offer_reaches_the_wire_and_is_never_echoed_as_a_message() {
+    let (listener, port) = listen().await;
+
+    let server = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listener).await;
+        peer.register("alp").await;
+        peer.line().await
+    });
+
+    let mut client = spawn(config(port));
+    while !matches!(next(&mut client).await, Event::Registered { .. }) {}
+
+    client
+        .handle
+        .ctcp("bob", "DCC", Some("SEND report.pdf 3232235777 5000 1024"))
+        .unwrap();
+
+    let received = timeout(WAIT, server).await.unwrap().unwrap();
+    assert_eq!(
+        received,
+        "PRIVMSG bob :\u{1}DCC SEND report.pdf 3232235777 5000 1024\u{1}"
+    );
+
+    // Only the request went out; nothing came back as a chat message to draw
+    // into a conversation.
+    client.handle.quit(None).unwrap();
+    let mut saw_only_disconnect = true;
+    while let Some(event) = tokio::time::timeout(Duration::from_millis(200), client.events.recv())
+        .await
+        .ok()
+        .flatten()
+    {
+        if !matches!(event, Event::Disconnected { .. }) {
+            saw_only_disconnect = false;
+        }
+    }
+    assert!(
+        saw_only_disconnect,
+        "the DCC offer must not appear as a Message event"
+    );
+}
+
+#[tokio::test]
 async fn nothing_listening_is_reported_and_retried_not_fatal() {
     // Bind to learn a free port, then close it so nothing is listening there.
     let port = {

@@ -56,6 +56,13 @@ pub enum Command {
         reason: Option<String>,
     },
     Nick(String),
+    /// A CTCP request of our own, such as a `DCC SEND` offer. Never echoed
+    /// locally as a chat message.
+    Ctcp {
+        target: String,
+        command: String,
+        params: Option<String>,
+    },
     /// A line to send as typed.
     Raw(String),
     /// Leave the network and stop, without reconnecting.
@@ -130,6 +137,15 @@ impl Handle {
 
     pub fn raw(&self, line: &str) -> Result<(), Closed> {
         self.send(Command::Raw(line.to_owned()))
+    }
+
+    /// Sends a CTCP request of our own, such as a `DCC SEND` offer.
+    pub fn ctcp(&self, target: &str, command: &str, params: Option<&str>) -> Result<(), Closed> {
+        self.send(Command::Ctcp {
+            target: target.to_owned(),
+            command: command.to_owned(),
+            params: params.map(str::to_owned),
+        })
     }
 
     pub fn quit(&self, reason: Option<&str>) -> Result<(), Closed> {
@@ -363,6 +379,11 @@ fn apply(session: &mut Session, command: Command) -> Output {
         Command::Join(channels) => session.join(&channels),
         Command::Part { channel, reason } => session.part(&channel, reason.as_deref()),
         Command::Nick(nick) => session.change_nick(&nick),
+        Command::Ctcp {
+            target,
+            command,
+            params,
+        } => session.send_ctcp(&target, &command, params.as_deref()),
         Command::Raw(line) => session.raw(&line),
         // Handled by the caller, which has to stop the loop.
         Command::Quit(_) => Output::default(),

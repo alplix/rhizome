@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "rhizome-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "keyring",
  "rhizome-client",
@@ -3172,15 +3172,17 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "rhizome-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rhizome-proto",
  "rustls",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "webpki-roots",
@@ -3188,11 +3190,11 @@ dependencies = [
 
 [[package]]
 name = "rhizome-proto"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "rhizome-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rhizome-client",
  "rhizome-proto",

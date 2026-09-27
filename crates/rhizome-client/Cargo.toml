@@ -8,13 +8,14 @@ license.workspace = true
 
 [dependencies]
 rhizome-proto = { path = "../rhizome-proto" }
-tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros", "fs"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "macros", "net", "time", "sync", "fs"] }
+tempfile = "3"
 
 [lints]
 workspace = true

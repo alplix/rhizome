@@ -47,6 +47,7 @@ pub mod backoff;
 pub mod codec;
 pub mod config;
 pub mod connection;
+pub mod dcc;
 pub mod event;
 pub mod ratelimit;
 pub mod session;
