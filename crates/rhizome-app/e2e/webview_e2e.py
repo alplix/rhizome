@@ -364,6 +364,101 @@ def main():
         unread = page.evaluate("window.__rhizome.api.buffers('e2e').then(b => b.find(x => x.name === '#e2e').unread)")
         check("a conversation marked read has nothing unread", unread == 0, str(unread))
 
+        # ---- DCC file transfer, both directions, real sockets and real files ---------------
+        # Incoming: the fake server offers a file; the real window shows it and,
+        # once accepted, really downloads it.
+        dcc_listener = socket.socket()
+        dcc_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        dcc_listener.bind(("127.0.0.1", 0))
+        dcc_listener.listen(1)
+        dcc_port = dcc_listener.getsockname()[1]
+        dcc_content = "gerçek bir dosyanın içeriği, hatayı da içeriyor. ".encode("utf-8") * 400
+
+        def serve_once(listener, payload):
+            conn, _ = listener.accept()
+            conn.sendall(payload)
+            conn.close()
+
+        threading.Thread(target=serve_once, args=(dcc_listener, dcc_content), daemon=True).start()
+
+        loopback_u32 = (127 << 24) | 1
+        irc.send(
+            f":bob!b@h PRIVMSG alp :\x01DCC SEND rapor.txt {loopback_u32} {dcc_port} {len(dcc_content)}\x01"
+        )
+
+        # The offer arrives in a conversation with bob, not the channel
+        # currently on screen; open it, the way a person actually would.
+        check(
+            "a new conversation with bob appears in the sidebar",
+            wait_for(page, "!!document.querySelector('button.buffer[data-network=\"e2e\"][data-key=\"bob\"]')"),
+        )
+        page.evaluate(
+            "document.querySelector('button.buffer[data-network=\"e2e\"][data-key=\"bob\"]').click()"
+        )
+        check(
+            "an incoming DCC offer is shown with accept/decline buttons",
+            wait_for(page, "!!document.querySelector('.line.dcc.offered .dcc-actions')"),
+        )
+        page.evaluate(
+            "document.querySelector('.line.dcc[data-transfer-id] [data-dcc-action=\"accept\"]').click()"
+        )
+        check(
+            "the file is downloaded and the line shows it finished",
+            wait_for(page, "!!document.querySelector('.line.dcc.done')", seconds=20),
+        )
+        download_path = page.evaluate(
+            "[...window.__rhizome.state.networks.get('e2e').transfers.values()][0].path"
+        )
+        check(
+            "the downloaded file has the exact bytes offered, Turkish text and all",
+            Path(download_path).read_bytes() == dcc_content,
+            download_path,
+        )
+
+        # Outgoing: a real local file, offered through the real command, received
+        # by a stand-in for the other person.
+        source_path = Path(tempfile.mkstemp(prefix="rhizome-e2e-send-")[1])
+        outgoing_content = "diskteki gerçek bir dosya, e2e testi için".encode("utf-8")
+        source_path.write_bytes(outgoing_content)
+        try:
+            page.evaluate(
+                "window.__rhizome.api.dccSend('e2e', 'bob', %s)" % json.dumps(str(source_path))
+            )
+            deadline = time.time() + 15
+            offer_line = None
+            while time.time() < deadline and offer_line is None:
+                offer_line = next((l for l in irc.received if "DCC SEND" in l), None)
+                if offer_line is None:
+                    time.sleep(0.2)
+            check("sending a file offers it over the real connection", offer_line is not None, str(irc.received))
+            params = offer_line.split("DCC SEND ", 1)[1].rstrip("\x01").split(" ")
+            check("the offer names the real file", params[0] == source_path.name, offer_line)
+            send_port = int(params[2])
+
+            recv_sock = socket.socket()
+            recv_sock.settimeout(15)
+            recv_sock.connect(("127.0.0.1", send_port))
+            received = b""
+            while len(received) < len(outgoing_content):
+                chunk = recv_sock.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+            recv_sock.close()
+            check("the receiving side gets the exact bytes of the real file", received == outgoing_content)
+        finally:
+            # The sending task on the application's side may not have
+            # released its handle on the file the instant the last byte
+            # reached the socket; this is cleanup of a scratch file, not
+            # something the test result depends on.
+            for _ in range(10):
+                try:
+                    source_path.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    time.sleep(0.3)
+            dcc_listener.close()
+
         # ---- sending ---------------------------------------------------------------------
         page.evaluate("window.__rhizome.api.sendMessage('e2e', '#e2e', 'merhaba dünya, şu hatayı gördün mü?')")
         page.evaluate("window.__rhizome.api.sendMessage('e2e', '#e2e', 'hi\\r\\nQUIT :pwned')")

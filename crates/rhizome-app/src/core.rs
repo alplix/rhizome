@@ -8,15 +8,21 @@
 //! what will let a second front end reuse it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rhizome_client::{spawn, ChatMessage, Client, Config, Event, Handle, MessageKind};
+use rhizome_client::{
+    dcc as transfer, spawn, ChatMessage, Client, Config, Event, Handle, MessageKind,
+};
+use rhizome_proto::dcc as dcc_offer;
 use rhizome_store::{Kind, NewMessage, SearchOptions, SearchOrder};
 use tokio::sync::mpsc;
 
-use crate::dto::{event_lines, Envelope, UiBuffer, UiCursor, UiEvent, UiHit, UiMessage};
+use crate::dto::{
+    event_lines, DccDirection, Envelope, UiBuffer, UiCursor, UiEvent, UiHit, UiMessage,
+};
 use crate::secrets::SecretStore;
 use crate::storehost::StoreHost;
 
@@ -30,6 +36,12 @@ struct Running {
     generation: u64,
 }
 
+/// A `DCC SEND` someone offered us, not yet accepted or declined.
+struct PendingOffer {
+    network: String,
+    send: dcc_offer::Send,
+}
+
 struct Inner {
     store: StoreHost,
     /// Where remembered passwords live. Consulted here only to discard one that
@@ -38,6 +50,13 @@ struct Inner {
     out: mpsc::UnboundedSender<Envelope>,
     networks: Mutex<HashMap<String, Running>>,
     next_generation: AtomicU64,
+    /// Where an accepted transfer is saved.
+    downloads_dir: PathBuf,
+    offers: Mutex<HashMap<u64, PendingOffer>>,
+    /// Shared by incoming offers and outgoing sends: both name a transfer in
+    /// the same id space, so the interface has one kind of id to keep track
+    /// of rather than two.
+    next_transfer_id: AtomicU64,
 }
 
 /// Manages every network connection and the log.
@@ -88,10 +107,13 @@ fn new_message(network: &str, m: &ChatMessage, received_ms: i64) -> NewMessage {
 
 impl Core {
     /// Creates the core. Everything that happens is sent to the returned
-    /// receiver, which the caller drains into the interface.
+    /// receiver, which the caller drains into the interface. `downloads_dir`
+    /// is where an accepted `DCC SEND` transfer is saved; it is created on
+    /// first use, not here.
     pub fn new(
         store: StoreHost,
         secrets: Arc<dyn SecretStore>,
+        downloads_dir: PathBuf,
     ) -> (Core, mpsc::UnboundedReceiver<Envelope>) {
         let (out, events) = mpsc::unbounded_channel();
         let core = Core {
@@ -101,6 +123,9 @@ impl Core {
                 out,
                 networks: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(1),
+                downloads_dir,
+                offers: Mutex::new(HashMap::new()),
+                next_transfer_id: AtomicU64::new(1),
             }),
         };
         (core, events)
@@ -199,6 +224,113 @@ impl Core {
     /// survive the wire format.
     pub fn raw(&self, id: &str, line: &str) -> Result<(), String> {
         self.handle(id)?.raw(line).map_err(|e| e.to_string())
+    }
+
+    // ---- DCC file transfer -------------------------------------------------
+
+    /// Offers to send a file to someone on `network`, and starts listening for
+    /// them to accept. Everything that follows — the offer reaching them, the
+    /// transfer itself, its end — is reported asynchronously as events tagged
+    /// with the returned id, since none of it happens before this returns.
+    pub fn dcc_send(
+        &self,
+        network: &str,
+        target: &str,
+        path: std::path::PathBuf,
+    ) -> Result<String, String> {
+        let handle = self.handle(network)?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} is not a file", path.display()));
+        }
+        let size = meta.len();
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
+
+        let transfer_id = self.inner.next_transfer_id.fetch_add(1, Ordering::Relaxed);
+        let out = self.inner.out.clone();
+        let target = target.to_owned();
+        let network = network.to_owned();
+        tokio::spawn(async move {
+            if let Err(reason) = make_offer(
+                &handle,
+                &out,
+                &network,
+                transfer_id,
+                &target,
+                &filename,
+                size,
+                &path,
+            )
+            .await
+            {
+                let _ = out.send(Envelope {
+                    network,
+                    event: UiEvent::DccFailed {
+                        id: transfer_id.to_string(),
+                        reason,
+                    },
+                });
+            }
+        });
+        Ok(transfer_id.to_string())
+    }
+
+    /// Accepts an offer someone else made, connects to them, and starts
+    /// receiving the file into the downloads directory. Progress is reported
+    /// the same way as for a file this application is sending.
+    pub fn dcc_accept(&self, id: &str) -> Result<(), String> {
+        let transfer_id: u64 = id
+            .parse()
+            .map_err(|_| "not a valid transfer id".to_owned())?;
+        let offer = lock(&self.inner.offers)
+            .remove(&transfer_id)
+            .ok_or_else(|| "that offer is no longer available".to_owned())?;
+        if offer.send.is_passive() {
+            return Err("that offer is a reverse DCC, which is not supported".into());
+        }
+        std::fs::create_dir_all(&self.inner.downloads_dir).map_err(|e| e.to_string())?;
+        let dest = transfer::unique_destination(&self.inner.downloads_dir, &offer.send.filename);
+        let dest_shown = dest.display().to_string();
+        let out = self.inner.out.clone();
+        let size = offer.send.size;
+        tokio::spawn(async move {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(transfer::accept_send(
+                offer.send.ip,
+                offer.send.port,
+                size,
+                dest,
+                tx,
+            ));
+            relay_progress(
+                &out,
+                &offer.network,
+                transfer_id,
+                size,
+                &mut rx,
+                Some(dest_shown),
+            )
+            .await;
+            let _ = task.await;
+        });
+        Ok(())
+    }
+
+    /// Declines an offer someone else made. Classic DCC has no on-the-wire way
+    /// to say so; the offer is simply forgotten.
+    pub fn dcc_decline(&self, id: &str) -> Result<(), String> {
+        let transfer_id: u64 = id
+            .parse()
+            .map_err(|_| "not a valid transfer id".to_owned())?;
+        lock(&self.inner.offers)
+            .remove(&transfer_id)
+            .ok_or_else(|| "that offer is no longer available".to_owned())?;
+        Ok(())
     }
 
     // ---- the log ---------------------------------------------------------
@@ -339,6 +471,37 @@ async fn pump(inner: Arc<Inner>, id: String, generation: u64, mut events: mpsc::
         {
             *flag = forgot_password;
         }
+        // A `DCC SEND` is a CTCP request like any other at the engine level,
+        // but it is an offer to act on, not text to show as one more "bob
+        // sent a DCC request" line.
+        if let Event::Ctcp {
+            from,
+            command,
+            params,
+            reply: false,
+        } = &event
+        {
+            if command.eq_ignore_ascii_case("DCC") {
+                if let Some(send) = params.as_deref().and_then(dcc_offer::parse_send) {
+                    let transfer_id = inner.next_transfer_id.fetch_add(1, Ordering::Relaxed);
+                    ui = UiEvent::DccOffer {
+                        id: transfer_id.to_string(),
+                        direction: DccDirection::Receive,
+                        peer: from.clone(),
+                        filename: send.filename.clone(),
+                        size: send.size,
+                        passive: send.is_passive(),
+                    };
+                    lock(&inner.offers).insert(
+                        transfer_id,
+                        PendingOffer {
+                            network: id.clone(),
+                            send,
+                        },
+                    );
+                }
+            }
+        }
         let envelope = Envelope {
             network: id.clone(),
             event: ui,
@@ -377,6 +540,79 @@ async fn pump(inner: Arc<Inner>, id: String, generation: u64, mut events: mpsc::
     });
 }
 
+/// Sends the `DCC SEND` offer itself, then hands off to [`relay_progress`]
+/// for everything that happens once the other side connects (or does not).
+#[allow(clippy::too_many_arguments)]
+async fn make_offer(
+    handle: &Handle,
+    out: &mpsc::UnboundedSender<Envelope>,
+    network: &str,
+    transfer_id: u64,
+    target: &str,
+    filename: &str,
+    size: u64,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let ip = transfer::local_ipv4().await.map_err(|e| e.to_string())?;
+    let (listener, port) = transfer::listen().await.map_err(|e| e.to_string())?;
+    let params = dcc_offer::build_send(filename, ip, port, size);
+    handle
+        .ctcp(target, "DCC", Some(&params))
+        .map_err(|_| format!("{network} is not connected"))?;
+
+    let _ = out.send(Envelope {
+        network: network.to_owned(),
+        event: UiEvent::DccOffer {
+            id: transfer_id.to_string(),
+            direction: DccDirection::Send,
+            peer: target.to_owned(),
+            filename: filename.to_owned(),
+            size,
+            passive: false,
+        },
+    });
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(transfer::offer_send(listener, path.to_owned(), tx));
+    relay_progress(out, network, transfer_id, size, &mut rx, None).await;
+    let _ = task.await;
+    Ok(())
+}
+
+/// Turns the transfer engine's plain progress channel into the events the
+/// interface understands, for either direction: sending only ever reaches
+/// `Done` with no path, receiving fills it in with where the file landed.
+async fn relay_progress(
+    out: &mpsc::UnboundedSender<Envelope>,
+    network: &str,
+    transfer_id: u64,
+    total: u64,
+    rx: &mut mpsc::UnboundedReceiver<transfer::TransferEvent>,
+    done_path: Option<String>,
+) {
+    while let Some(event) = rx.recv().await {
+        let ui = match event {
+            transfer::TransferEvent::Progress(sent) => UiEvent::DccProgress {
+                id: transfer_id.to_string(),
+                sent,
+                total,
+            },
+            transfer::TransferEvent::Done => UiEvent::DccDone {
+                id: transfer_id.to_string(),
+                path: done_path.clone(),
+            },
+            transfer::TransferEvent::Failed(reason) => UiEvent::DccFailed {
+                id: transfer_id.to_string(),
+                reason,
+            },
+        };
+        let _ = out.send(Envelope {
+            network: network.to_owned(),
+            event: ui,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,9 +620,9 @@ mod tests {
 
     use crate::secrets::MemorySecrets;
     use rhizome_store::Store;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::time::timeout;
 
     const WAIT: Duration = Duration::from_secs(10);
@@ -437,9 +673,21 @@ mod tests {
         core_with(Arc::new(MemorySecrets::default()))
     }
 
+    /// A downloads directory most tests never touch, so it is never actually
+    /// created; each gets its own so the few that do cannot see each other's
+    /// files.
+    fn downloads_dir() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "rhizome-core-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     fn core_with(secrets: Arc<dyn SecretStore>) -> (Core, mpsc::UnboundedReceiver<Envelope>) {
         let store = StoreHost::spawn(Store::open_in_memory().unwrap(), Box::new(|_| {}));
-        Core::new(store, secrets)
+        Core::new(store, secrets, downloads_dir())
     }
 
     async fn listen() -> (TcpListener, u16) {
@@ -566,6 +814,213 @@ mod tests {
 
         core.disconnect("test").unwrap();
         assert!(server.await.unwrap().starts_with("QUIT"));
+    }
+
+    /// 127.0.0.1 as the 32-bit unsigned integer classic DCC addresses use.
+    const LOOPBACK_U32: u32 = 0x7F00_0001;
+
+    #[tokio::test]
+    async fn an_incoming_dcc_offer_can_be_accepted_and_downloaded() {
+        let (core, mut rx) = core();
+        let content = b"the contents of report.pdf, not that it matters here".to_vec();
+        let content_len = content.len() as u64;
+
+        // Stands in for "bob": accepts one connection and sends the bytes.
+        // Bound first so its real port can be named in the offer below.
+        let sender = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let sender_port = sender.local_addr().unwrap().port();
+        let to_send = content.clone();
+        let sender_task = tokio::spawn(async move {
+            let (mut socket, _) = sender.accept().await.unwrap();
+            socket.write_all(&to_send).await.unwrap();
+        });
+
+        let (listener, port) = listen().await;
+        let server = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.register().await;
+            peer.send(&format!(
+                ":bob!b@h PRIVMSG alp :\u{1}DCC SEND report.pdf {LOOPBACK_U32} {sender_port} {content_len}\u{1}"
+            ))
+            .await;
+            peer.line().await
+        });
+
+        core.connect("test", config(port)).unwrap();
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+
+        let offer = until(&mut rx, |e| matches!(e, UiEvent::DccOffer { .. })).await;
+        assert_eq!(offer.network, "test");
+        let UiEvent::DccOffer {
+            id,
+            direction,
+            peer: from,
+            filename,
+            size,
+            passive,
+        } = offer.event
+        else {
+            unreachable!()
+        };
+        assert_eq!(direction, DccDirection::Receive);
+        assert_eq!(from, "bob");
+        assert_eq!(filename, "report.pdf");
+        assert_eq!(size, content_len);
+        assert!(!passive);
+
+        core.dcc_accept(&id).unwrap();
+        let done = until(&mut rx, |e| matches!(e, UiEvent::DccDone { .. })).await;
+        let UiEvent::DccDone { path, .. } = done.event else {
+            unreachable!()
+        };
+        let path = path.unwrap();
+        assert!(path.ends_with("report.pdf"), "{path}");
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), content);
+
+        sender_task.await.unwrap();
+        core.disconnect("test").unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_declined_offer_is_forgotten_and_downloads_nothing() {
+        let (core, mut rx) = core();
+        let (listener, port) = listen().await;
+        let server = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.register().await;
+            peer.send(&format!(
+                ":bob!b@h PRIVMSG alp :\u{1}DCC SEND x.bin {LOOPBACK_U32} 1 1\u{1}"
+            ))
+            .await;
+            peer.line().await
+        });
+
+        core.connect("test", config(port)).unwrap();
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+        let offer = until(&mut rx, |e| matches!(e, UiEvent::DccOffer { .. })).await;
+        let UiEvent::DccOffer { id, .. } = offer.event else {
+            unreachable!()
+        };
+
+        core.dcc_decline(&id).unwrap();
+        assert!(core
+            .dcc_accept(&id)
+            .unwrap_err()
+            .contains("no longer available"));
+        assert!(
+            core.dcc_decline(&id).is_err(),
+            "declining twice is an error, not a crash"
+        );
+
+        core.disconnect("test").unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_passive_offer_is_shown_but_cannot_be_accepted() {
+        let (core, mut rx) = core();
+        let (listener, port) = listen().await;
+        let server = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.register().await;
+            // Port 0: "reverse" DCC, which this client does not implement.
+            peer.send(&format!(
+                ":bob!b@h PRIVMSG alp :\u{1}DCC SEND x.bin {LOOPBACK_U32} 0 100 sometoken\u{1}"
+            ))
+            .await;
+            peer.line().await
+        });
+
+        core.connect("test", config(port)).unwrap();
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+        let offer = until(&mut rx, |e| matches!(e, UiEvent::DccOffer { .. })).await;
+        let UiEvent::DccOffer { id, passive, .. } = offer.event else {
+            unreachable!()
+        };
+        assert!(passive);
+        assert!(core.dcc_accept(&id).unwrap_err().contains("reverse DCC"));
+
+        core.disconnect("test").unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sending_a_file_offers_it_and_streams_it_to_whoever_connects() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("notes.txt");
+        let content = b"merhaba dunya, from a real file on disk".to_vec();
+        let content_len = content.len() as u64;
+        tokio::fs::write(&source, &content).await.unwrap();
+
+        let (core, mut rx) = core();
+        let (listener, port) = listen().await;
+        let server = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            peer.register().await;
+            let offer_line = peer.line().await;
+            // "PRIVMSG bob :\x01DCC SEND notes.txt <ip> <port> <size>\x01"
+            let params: Vec<&str> = offer_line
+                .split("DCC SEND ")
+                .nth(1)
+                .unwrap()
+                .trim_end_matches('\u{1}')
+                .split(' ')
+                .collect();
+            assert_eq!(params[0], "notes.txt");
+            let dcc_port: u16 = params[2].parse().unwrap();
+            let size: u64 = params[3].parse().unwrap();
+            assert_eq!(size, content_len);
+
+            let mut socket = TcpStream::connect(("127.0.0.1", dcc_port)).await.unwrap();
+            let mut received = Vec::new();
+            socket.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, content);
+            peer.line().await
+        });
+
+        core.connect("test", config(port)).unwrap();
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+
+        let id = core.dcc_send("test", "bob", source).unwrap();
+        let offer = until(&mut rx, |e| matches!(e, UiEvent::DccOffer { .. })).await;
+        assert_eq!(
+            offer.event,
+            UiEvent::DccOffer {
+                id: id.clone(),
+                direction: DccDirection::Send,
+                peer: "bob".into(),
+                filename: "notes.txt".into(),
+                size: content_len,
+                passive: false,
+            }
+        );
+
+        let done = until(&mut rx, |e| matches!(e, UiEvent::DccDone { .. })).await;
+        assert_eq!(done.event, UiEvent::DccDone { id, path: None });
+
+        core.disconnect("test").unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sending_a_file_that_does_not_exist_is_an_immediate_error() {
+        let (core, _rx) = core();
+        let (_listener, port) = listen().await;
+        core.connect("test", config(port)).unwrap();
+        let err = core
+            .dcc_send("test", "bob", "/no/such/file-at-all.bin".into())
+            .unwrap_err();
+        assert!(err.contains("could not read"), "{err}");
+        core.disconnect("test").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bad_transfer_id_is_an_error_not_a_panic() {
+        let (core, _rx) = core();
+        assert!(core.dcc_accept("not-a-number").is_err());
+        assert!(core.dcc_decline("not-a-number").is_err());
+        assert!(core.dcc_accept("999999").is_err());
     }
 
     #[tokio::test]

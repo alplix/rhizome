@@ -332,6 +332,31 @@ fn raw(state: State<'_, AppState>, network: String, line: String) -> Result<(), 
     state.core.raw(&network, &line)
 }
 
+// These three are `async fn`, even though nothing in their body actually
+// awaits, purely so Tauri runs them on a thread with a Tokio runtime already
+// in scope — the same reason `connect` below is async. `dcc_send` and
+// `dcc_accept` each start a background transfer with `tokio::spawn`, which
+// panics ("there is no reactor running") called from anywhere else.
+#[tauri::command]
+async fn dcc_send(
+    state: State<'_, AppState>,
+    network: String,
+    target: String,
+    path: String,
+) -> Result<String, String> {
+    state.core.dcc_send(&network, &target, PathBuf::from(path))
+}
+
+#[tauri::command]
+async fn dcc_accept(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.core.dcc_accept(&id)
+}
+
+#[tauri::command]
+fn dcc_decline(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.core.dcc_decline(&id)
+}
+
 #[tauri::command]
 async fn scrollback(
     state: State<'_, AppState>,
@@ -492,7 +517,7 @@ pub fn run() {
                 }),
             );
             let secrets: Arc<dyn SecretStore> = Arc::new(SystemSecrets::new(CREDENTIAL_SERVICE));
-            let (core, mut events) = Core::new(store, secrets);
+            let (core, mut events) = Core::new(store, secrets, dir.join("downloads"));
 
             let reporter = core.clone();
             tauri::async_runtime::spawn(async move {
@@ -607,6 +632,9 @@ pub fn run() {
             part,
             set_nick,
             raw,
+            dcc_send,
+            dcc_accept,
+            dcc_decline,
             scrollback,
             search,
             around,

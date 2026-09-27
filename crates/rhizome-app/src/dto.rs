@@ -357,6 +357,16 @@ impl UiMessage {
     }
 }
 
+/// Which way a `DCC SEND` transfer is going.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DccDirection {
+    /// A file this application is sending.
+    Send,
+    /// A file this application is receiving.
+    Receive,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UiMember {
     pub nick: String,
@@ -489,6 +499,37 @@ pub enum UiEvent {
         from: String,
         command: String,
         reply: bool,
+    },
+    /// A `DCC SEND` offer, ours to make or someone else's to accept or
+    /// decline. `id` names the transfer in every event about it that follows.
+    DccOffer {
+        id: String,
+        direction: DccDirection,
+        peer: String,
+        filename: String,
+        size: u64,
+        /// A "reverse" (passive) offer: the sender is not listening, so this
+        /// one cannot be accepted. Only meaningful when `direction` is
+        /// `receive` — an offer this application makes is never passive.
+        passive: bool,
+    },
+    /// Bytes moved so far, for a transfer already under way.
+    DccProgress {
+        id: String,
+        sent: u64,
+        total: u64,
+    },
+    /// Every byte moved successfully.
+    DccDone {
+        id: String,
+        /// Where a received file was saved. Absent for a file we sent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// A transfer stopped before finishing.
+    DccFailed {
+        id: String,
+        reason: String,
     },
 
     Joined {
@@ -809,6 +850,56 @@ mod tests {
         };
         let json = serde_json::to_value(&gave_up).unwrap();
         assert!(json.get("retry_in_ms").is_none());
+    }
+
+    #[test]
+    fn dcc_events_serialise_with_the_fields_the_interface_needs() {
+        let offer = UiEvent::DccOffer {
+            id: "1".into(),
+            direction: DccDirection::Receive,
+            peer: "bob".into(),
+            filename: "report.pdf".into(),
+            size: 1024,
+            passive: false,
+        };
+        let json = serde_json::to_value(&offer).unwrap();
+        assert_eq!(json["type"], "dcc_offer");
+        assert_eq!(json["direction"], "receive");
+        assert_eq!(json["peer"], "bob");
+        assert_eq!(json["passive"], false);
+
+        let progress = UiEvent::DccProgress {
+            id: "1".into(),
+            sent: 512,
+            total: 1024,
+        };
+        assert_eq!(
+            serde_json::to_value(&progress).unwrap()["type"],
+            "dcc_progress"
+        );
+
+        // A received file's path is shown; a sent file's is not there at all.
+        let received = UiEvent::DccDone {
+            id: "1".into(),
+            path: Some("/downloads/report.pdf".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&received).unwrap()["path"],
+            "/downloads/report.pdf"
+        );
+        let sent = UiEvent::DccDone {
+            id: "1".into(),
+            path: None,
+        };
+        assert!(serde_json::to_value(&sent).unwrap().get("path").is_none());
+
+        let failed = UiEvent::DccFailed {
+            id: "1".into(),
+            reason: "timed out".into(),
+        };
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["type"], "dcc_failed");
+        assert_eq!(json["reason"], "timed out");
     }
 
     #[test]
