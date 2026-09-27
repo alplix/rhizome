@@ -252,11 +252,14 @@ export default {
   "theme.system": "System",
 
   "toast.add_network_first": "Add a network first.",
+  "toast.already_connected": "{name} is already connected.",
+  "toast.already_retrying": "{name} is disconnected and retrying automatically.",
   "toast.disconnect_first": "Disconnect before deleting a network.",
   "toast.history_cleared.one": "History cleared ({count} line).",
   "toast.history_cleared.other": "History cleared ({count} lines).",
   "toast.kicked": "{by} removed you from {channel}",
   "toast.not_connected": "{name} is not connected.",
+  "toast.not_joined": "You have not joined {channel}.",
   "toast.password_forgotten": "Saved password removed.",
   "toast.pick_channel": "Pick a channel or conversation first. Try /join #channel",
 

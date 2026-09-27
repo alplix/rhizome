@@ -819,6 +819,13 @@ async function runAction(action, net, buffer) {
         toast(t("toast.pick_channel"), "error");
         return false;
       }
+      if (buffer.kind === "channel" && !buffer.joined) {
+        // Sending anyway would just come back as a cryptic numeric error
+        // from the server (ERR_CANNOTSENDTOCHAN) once the round trip
+        // finishes; saying so locally, immediately, is clearer.
+        toast(t("toast.not_joined", { channel: buffer.name }), "error");
+        return false;
+      }
       if (!(await paste(action.text))) return false;
       await api.sendMessage(net.id, target, action.text, action.type === "action" ? "action" : "privmsg");
       return true;
@@ -1122,6 +1129,21 @@ async function askPassword(profile) {
 async function connectProfile(id, { auto = false } = {}) {
   const profile = profiles.find((p) => p.id === id);
   if (!profile) return;
+  const net = state.networks.get(id);
+  if (net && isLive(net)) {
+    // Already connected, connecting, or waiting to retry: asking the
+    // backend again would just bounce back as its own raw "already
+    // connected" text. Say what is actually happening instead.
+    if (!auto) {
+      toast(
+        net.status === "waiting"
+          ? t("toast.already_retrying", { name: profile.name })
+          : t("toast.already_connected", { name: profile.name }),
+        "info",
+      );
+    }
+    return;
+  }
   let password = null;
   let remember = false;
   if (profile.sasl_account && !profile.client_cert_path) {

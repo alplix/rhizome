@@ -253,11 +253,14 @@ export default {
   "theme.system": "Sistem",
 
   "toast.add_network_first": "Önce bir ağ ekleyin.",
+  "toast.already_connected": "{name} zaten bağlı.",
+  "toast.already_retrying": "{name} bağlantısı koptu, otomatik olarak yeniden deneniyor.",
   "toast.disconnect_first": "Bir ağı silmeden önce bağlantıyı kesin.",
   "toast.history_cleared.one": "Geçmiş temizlendi ({count} satır).",
   "toast.history_cleared.other": "Geçmiş temizlendi ({count} satır).",
   "toast.kicked": "{by} sizi {channel} kanalından çıkardı",
   "toast.not_connected": "{name} bağlı değil.",
+  "toast.not_joined": "{channel} kanalına katılmadınız.",
   "toast.password_forgotten": "Kayıtlı parola silindi.",
   "toast.pick_channel": "Önce bir kanal ya da konuşma seçin. /join #kanal deneyin",
 
