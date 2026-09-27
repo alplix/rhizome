@@ -131,14 +131,13 @@ fn a_conversation_flows_from_the_wire_into_search() {
         .unwrap();
     assert_eq!(private[0].message.sender, "dave");
 
-    // Turkish, typed without Turkish characters.
+    // Turkish, typed without Turkish characters — including the dotless ı
+    // in "hatayı", which is tried as a plain i too.
     let turkish = store
         .search("dunya hatayi", &SearchOptions::default())
         .unwrap();
-    assert!(
-        turkish.is_empty(),
-        "'hatayı' has a dotless ı, which is not folded to i"
-    );
+    assert_eq!(turkish.len(), 1);
+    assert_eq!(turkish[0].message.sender, "carol");
     let turkish = store
         .search("dunya turkce", &SearchOptions::default())
         .unwrap();

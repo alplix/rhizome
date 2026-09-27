@@ -94,6 +94,61 @@ fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
+/// Every spelling a word could have, given that a plain `i` and Turkish's
+/// dotless `ı` are typed interchangeably.
+///
+/// `unicode61 remove_diacritics 2` already folds `ş`→`s`, `ç`→`c`, `ğ`→`g`,
+/// `ü`→`u`, `ö`→`o` and (via ordinary case-folding) `İ`/`I`→`i`, so typing any
+/// of those without Turkish characters already finds the accented word — see
+/// `schema.rs`. Dotless `ı` is the one gap: it is not a diacritic of `i` in
+/// Unicode's own terms but a distinct Turkish letter, so SQLite's tokenizer
+/// leaves it exactly as typed on both sides of a search, and "hatayi" can
+/// never equal the indexed token "hatayı" no matter what tokenizer options
+/// are set.
+///
+/// Rather than rewrite what gets indexed (which would mean showing a folded,
+/// slightly wrong result snippet instead of the real message), every
+/// occurrence of `i` or `ı` in a *query* word is tried as both: "hatayi" and
+/// "hatayı" both expand to the same pair of spellings, and whichever one is
+/// actually in the log matches. A word with more than a handful of these
+/// letters is left as typed rather than trying every one of `2^n`
+/// combinations.
+fn spellings(text: &str) -> Vec<String> {
+    let swaps: Vec<(usize, char, char)> = text
+        .char_indices()
+        .filter_map(|(i, c)| match c {
+            'i' => Some((i, c, 'ı')),
+            'ı' => Some((i, c, 'i')),
+            _ => None,
+        })
+        .collect();
+
+    if swaps.is_empty() || swaps.len() > 8 {
+        return vec![text.to_owned()];
+    }
+
+    let mut variants: Vec<String> = (0..1u32 << swaps.len())
+        .map(|mask| {
+            let mut out = String::with_capacity(text.len());
+            let mut last = 0;
+            for (bit, &(pos, plain, swapped)) in swaps.iter().enumerate() {
+                out.push_str(&text[last..pos]);
+                out.push(if mask & (1 << bit) == 0 {
+                    plain
+                } else {
+                    swapped
+                });
+                last = pos + plain.len_utf8();
+            }
+            out.push_str(&text[last..]);
+            out
+        })
+        .collect();
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
 /// Parses the contents of a search box.
 pub fn parse(input: &str) -> ParsedQuery {
     let mut parsed = ParsedQuery::default();
@@ -131,11 +186,27 @@ pub fn parse(input: &str) -> ParsedQuery {
             continue;
         }
         parsed.terms.push(text.to_owned());
-        expressions.push(format!("{}{}", quote(text), if prefix { "*" } else { "" }));
+        let suffix = if prefix { "*" } else { "" };
+        let variants = spellings(text);
+        expressions.push(if variants.len() == 1 {
+            format!("{}{}", quote(&variants[0]), suffix)
+        } else {
+            let alternatives: Vec<String> = variants
+                .iter()
+                .map(|v| format!("{}{}", quote(v), suffix))
+                .collect();
+            format!("({})", alternatives.join(" OR "))
+        });
     }
 
     if !expressions.is_empty() {
-        parsed.fts = Some(expressions.join(" "));
+        // FTS5 only lets two phrases sit side by side with an implicit AND
+        // when *neither* is parenthesized; join with an explicit `AND` so a
+        // query is never broken by some *other* word happening to expand
+        // into an `(a OR b)` group. `AND` is always legal between two plain
+        // phrases too, so this is not conditional on whether any group in
+        // this particular query actually has parentheses.
+        parsed.fts = Some(expressions.join(" AND "));
     }
     parsed
 }
@@ -162,16 +233,23 @@ mod tests {
 
     #[test]
     fn plain_words_are_quoted_and_anded() {
-        assert_eq!(fts("null pointer"), Some("\"null\" \"pointer\"".into()));
+        // "pointer" has one swappable letter, so it is tried both ways.
+        assert_eq!(
+            fts("null pointer"),
+            Some("\"null\" AND (\"pointer\" OR \"poınter\")".into())
+        );
         assert_eq!(parse("null pointer").terms, vec!["null", "pointer"]);
     }
 
     #[test]
     fn a_quoted_phrase_stays_one_unit() {
-        assert_eq!(fts("\"null pointer\""), Some("\"null pointer\"".into()));
+        assert_eq!(
+            fts("\"null pointer\""),
+            Some("(\"null pointer\" OR \"null poınter\")".into())
+        );
         assert_eq!(
             fts("bug \"null pointer\" kernel"),
-            Some("\"bug\" \"null pointer\" \"kernel\"".into())
+            Some("\"bug\" AND (\"null pointer\" OR \"null poınter\") AND \"kernel\"".into())
         );
     }
 
@@ -226,7 +304,7 @@ mod tests {
         for word in ["AND", "OR", "NOT", "NEAR", "NEAR/3"] {
             assert_eq!(fts(word), Some(format!("\"{word}\"")), "{word}");
         }
-        assert_eq!(fts("a OR b"), Some("\"a\" \"OR\" \"b\"".into()));
+        assert_eq!(fts("a OR b"), Some("\"a\" AND \"OR\" AND \"b\"".into()));
     }
 
     #[test]
@@ -259,8 +337,12 @@ mod tests {
                     depth = 1 - depth;
                 }
             } else if depth == 0 {
+                // Now also allowed, but only ever emitted by this file
+                // itself, never copied from the input: the explicit `AND`
+                // joining top-level phrases and the parentheses/`OR` of an
+                // i/ı expansion.
                 assert!(
-                    c == ' ' || c == '*',
+                    matches!(c, ' ' | '*' | '(' | ')' | 'A' | 'N' | 'D' | 'O' | 'R'),
                     "syntax leaked outside a literal: {expr}"
                 );
             }
@@ -278,7 +360,10 @@ mod tests {
 
     #[test]
     fn an_unterminated_quote_still_searches() {
-        assert_eq!(fts("\"null poin"), Some("\"null poin\"".into()));
+        assert_eq!(
+            fts("\"null poin"),
+            Some("(\"null poin\" OR \"null poın\")".into())
+        );
     }
 
     #[test]
@@ -290,13 +375,77 @@ mod tests {
 
     #[test]
     fn non_ascii_words_survive() {
-        assert_eq!(fts("şaşırtıcı"), Some("\"şaşırtıcı\"".into()));
-        assert_eq!(fts("İSTANBUL"), Some("\"İSTANBUL\"".into()));
+        // No `i` or dotless `ı` in either word, so each is a single literal.
+        assert_eq!(fts("büyük"), Some("\"büyük\"".into()));
+        assert_eq!(fts("GÜNAYDIN"), Some("\"GÜNAYDIN\"".into()));
+    }
+
+    #[test]
+    fn a_plain_i_and_a_dotless_i_are_both_tried() {
+        // Whichever one was actually typed by the person who sent the
+        // message, searching with the other spelling still finds it.
+        assert_eq!(fts("hatayı"), Some("(\"hatayi\" OR \"hatayı\")".into()));
+        assert_eq!(fts("hatayi"), Some("(\"hatayi\" OR \"hatayı\")".into()));
+
+        // A prefix search expands the same way, star and all.
+        assert_eq!(fts("dilek*"), Some("(\"dilek\"* OR \"dılek\"*)".into()));
+
+        // Inside a phrase too — the whole phrase is one alternative each time.
+        assert_eq!(
+            fts("\"tarih boyunca\""),
+            Some("(\"tarih boyunca\" OR \"tarıh boyunca\")".into())
+        );
+
+        // Capital `İ` and plain ASCII `I` are not part of this: unicode61
+        // already folds those on its own (see schema.rs), so a word with
+        // neither lowercase letter is not expanded.
+        assert_eq!(fts("İstanbul"), Some("\"İstanbul\"".into()));
+        assert_eq!(fts("ISTANBUL"), Some("\"ISTANBUL\"".into()));
+
+        // A pathological number of swappable letters is left as typed
+        // instead of trying every one of 2^n combinations.
+        let many = "i".repeat(9);
+        assert_eq!(fts(&many), Some(format!("\"{many}\"")));
+    }
+
+    #[test]
+    fn the_i_expansion_cannot_be_used_to_inject_syntax() {
+        // Same adversarial shape as the test above, with an `i` added so the
+        // expansion actually triggers, and check the OR-group it produces is
+        // exactly as closed as a single literal was.
+        let q = parse("\"i OR 1=1 -- \" ) NOT (");
+        let expr = q.fts.unwrap();
+        let mut depth = 0;
+        let mut chars = expr.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '"' {
+                if depth == 1 && chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    depth = 1 - depth;
+                }
+            } else if depth == 0 {
+                // Now also allowed, but only ever emitted by this file
+                // itself, never copied from the input: the grouping
+                // parentheses, the `OR` joining our own alternatives, and
+                // the `AND` joining this group to the other token.
+                assert!(
+                    matches!(c, ' ' | '*' | '(' | ')' | 'A' | 'N' | 'D' | 'O' | 'R'),
+                    "syntax leaked outside a literal: {expr}"
+                );
+            }
+        }
+        assert_eq!(depth, 0, "unterminated literal in {expr}");
     }
 
     #[test]
     fn identifiers_with_underscores_are_searchable() {
+        // No `i` at all in this one.
         assert_eq!(fts("kmalloc_array"), Some("\"kmalloc_array\"".into()));
-        assert_eq!(fts("__init"), Some("\"__init\"".into()));
+        // Two swappable letters: all four combinations.
+        assert_eq!(
+            fts("__init"),
+            Some("(\"__init\" OR \"__inıt\" OR \"__ınit\" OR \"__ınıt\")".into())
+        );
     }
 }

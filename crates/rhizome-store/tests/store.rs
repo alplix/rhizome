@@ -476,6 +476,24 @@ fn turkish_text_is_found_with_or_without_diacritics() {
 }
 
 #[test]
+fn a_dotless_i_and_a_plain_i_find_each_other() {
+    let mut s = store();
+    // Typed with the real Turkish letter.
+    s.log_message(&msg("#c", "a", "şu Türkçe hatayı gördüm", 1000))
+        .unwrap();
+    // Typed on a keyboard with no Turkish characters at all.
+    assert_eq!(hits(&s, "hatayi").len(), 1);
+    // And the reverse: a message typed without Turkish characters is found
+    // by someone typing the real letter.
+    s.log_message(&msg("#c", "b", "izmir'e gidiyorum", 2000))
+        .unwrap();
+    assert_eq!(hits(&s, "ızmir").len(), 1);
+    // The displayed snippet is the real message, not a folded stand-in.
+    let found = s.search("hatayi", &SearchOptions::default()).unwrap();
+    assert!(found[0].snippet.contains('ı'), "{}", found[0].snippet);
+}
+
+#[test]
 fn search_finds_non_latin_scripts_and_emoji_text() {
     let mut s = store();
     s.log_message(&msg("#c", "a", "привет мир", 1000)).unwrap();
