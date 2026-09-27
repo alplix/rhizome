@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use rhizome_proto::Mechanism;
 
+use crate::identity::ClientCert;
+
 /// A string that refuses to print itself.
 ///
 /// The server password is a credential. Wrapping it means that a stray
@@ -52,6 +54,13 @@ pub struct Config {
     /// in channels without the identity you meant to have.
     pub sasl: Vec<Mechanism>,
 
+    /// Presented during the TLS handshake, for SASL `EXTERNAL`. Only
+    /// meaningful together with a matching [`Mechanism::External`] in
+    /// [`Config::sasl`] — see [`Config::sasl_external`], which sets up both
+    /// at once. Ignored when [`Config::tls`] is off; there is no handshake to
+    /// present it in.
+    pub client_cert: Option<ClientCert>,
+
     /// Channels to join once registered, and to rejoin after a reconnect.
     pub autojoin: Vec<String>,
 
@@ -81,6 +90,7 @@ impl Config {
             nick,
             server_password: None,
             sasl: Vec::new(),
+            client_cert: None,
             autojoin: Vec::new(),
             rate_burst: 5,
             rate_per_second: 1.0,
@@ -107,6 +117,19 @@ impl Config {
         self.sasl.push(Mechanism::Plain {
             authcid: account.into(),
             password: password.into(),
+        });
+        self
+    }
+
+    /// Authenticate by SASL `EXTERNAL`: presents `cert` during the TLS
+    /// handshake and asks the server to authenticate the connection by it,
+    /// rather than a password. `authzid` names the account to act as, when it
+    /// differs from the one the certificate itself is registered to —
+    /// usually left empty.
+    pub fn sasl_external(mut self, cert: ClientCert, authzid: impl Into<String>) -> Config {
+        self.client_cert = Some(cert);
+        self.sasl.push(Mechanism::External {
+            authzid: authzid.into(),
         });
         self
     }
@@ -163,6 +186,35 @@ mod tests {
         );
         assert!(!shown.contains("server-secret-2"), "PASS leaked: {shown}");
         assert!(shown.contains("alp"));
+    }
+
+    #[test]
+    fn sasl_external_sets_both_the_certificate_and_the_mechanism() {
+        let cert = ClientCert::from_pem(
+            format!(
+                "{}\n{}",
+                include_str!("../testdata/client.crt"),
+                include_str!("../testdata/client.key")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let c = Config::new("h", "alp").sasl_external(cert, "services-account");
+        assert!(c.client_cert.is_some());
+        assert_eq!(
+            c.sasl,
+            vec![Mechanism::External {
+                authzid: "services-account".into()
+            }]
+        );
+        // The private key never turns up in Config's own Debug output either.
+        let shown = format!("{c:?}");
+        for line in include_str!("../testdata/client.key")
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+        {
+            assert!(!shown.contains(line), "key material leaked: {shown}");
+        }
     }
 
     #[test]

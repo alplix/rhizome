@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "rhizome-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "keyring",
  "rhizome-client",
@@ -3178,10 +3178,11 @@ dependencies = [
 
 [[package]]
 name = "rhizome-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rhizome-proto",
  "rustls",
+ "rustls-pemfile",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -3190,11 +3191,11 @@ dependencies = [
 
 [[package]]
 name = "rhizome-proto"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "rhizome-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rhizome-client",
  "rhizome-proto",
@@ -3280,6 +3281,15 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

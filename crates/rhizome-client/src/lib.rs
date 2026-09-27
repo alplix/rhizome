@@ -49,6 +49,7 @@ pub mod config;
 pub mod connection;
 pub mod dcc;
 pub mod event;
+pub mod identity;
 pub mod ratelimit;
 pub mod session;
 

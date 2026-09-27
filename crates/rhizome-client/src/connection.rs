@@ -203,21 +203,42 @@ trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 type BoxedStream = Box<dyn AsyncStream>;
 
+fn root_store() -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+/// The ordinary connector, with no client certificate: built once and
+/// shared, since it is the same for every connection that does not need
+/// SASL `EXTERNAL`.
 fn tls_connector() -> TlsConnector {
     static CONNECTOR: OnceLock<TlsConnector> = OnceLock::new();
     CONNECTOR
         .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
             let config = ClientConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()
                 .expect("the ring provider supports the default protocol versions")
-                .with_root_certificates(roots)
+                .with_root_certificates(root_store())
                 .with_no_client_auth();
             TlsConnector::from(Arc::new(config))
         })
         .clone()
+}
+
+/// A connector presenting `cert` during the handshake, for SASL `EXTERNAL`.
+/// Built fresh each time: unlike the ordinary connector, this one varies per
+/// network, so nothing here is worth caching across connections.
+fn tls_connector_with_cert(cert: &crate::identity::ClientCert) -> io::Result<TlsConnector> {
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default protocol versions")
+        .with_root_certificates(root_store())
+        .with_client_auth_cert(cert.chain.clone(), cert.key.clone_key())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    Ok(TlsConnector::from(Arc::new(config)))
 }
 
 async fn connect(config: &Config) -> io::Result<BoxedStream> {
@@ -229,7 +250,11 @@ async fn connect(config: &Config) -> io::Result<BoxedStream> {
     }
     let name = ServerName::try_from(config.host.clone())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let tls = tls_connector().connect(name, tcp).await?;
+    let connector = match &config.client_cert {
+        Some(cert) => tls_connector_with_cert(cert)?,
+        None => tls_connector(),
+    };
+    let tls = connector.connect(name, tcp).await?;
     Ok(Box::new(tls))
 }
 
@@ -605,5 +630,136 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tls_client_cert_tests {
+    //! Whether a configured client certificate is actually presented during
+    //! a real TLS handshake, and whether a server that demands one — and
+    //! does not trust it — actually refuses the connection. Everything else
+    //! about SASL `EXTERNAL` (choosing it, the `AUTHENTICATE` exchange
+    //! itself) is sans-I/O and tested from transcripts in `session.rs`; this
+    //! is the one part that needs a real socket and a real TLS stack on
+    //! both ends, which is why it lives here rather than in
+    //! `tests/connection.rs`: it needs `ClientCert`'s fields to build a test
+    //! `ClientConfig` that trusts a private test CA, not the public roots
+    //! `tls_connector_with_cert` uses for real networks.
+
+    use std::io;
+    use std::sync::Arc;
+
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+    use tokio_rustls::rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    use crate::identity::ClientCert;
+
+    const CA_CERT: &str = include_str!("../testdata/ca.crt");
+    const SERVER_CERT: &str = include_str!("../testdata/server.crt");
+    const SERVER_KEY: &str = include_str!("../testdata/server.key");
+    const CLIENT_CERT: &str = include_str!("../testdata/client.crt");
+    const CLIENT_KEY: &str = include_str!("../testdata/client.key");
+    const OTHER_CERT: &str = include_str!("../testdata/other.crt");
+    const OTHER_KEY: &str = include_str!("../testdata/other.key");
+
+    fn certs(pem: &str) -> Vec<CertificateDer<'static>> {
+        rustls_pemfile::certs(&mut io::Cursor::new(pem.as_bytes()))
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn key(pem: &str) -> PrivateKeyDer<'static> {
+        rustls_pemfile::private_key(&mut io::Cursor::new(pem.as_bytes()))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn test_ca_roots() -> Arc<RootCertStore> {
+        let mut roots = RootCertStore::empty();
+        roots.add(certs(CA_CERT).remove(0)).unwrap();
+        Arc::new(roots)
+    }
+
+    /// A server config trusting our test CA for the client certificate it
+    /// demands, presenting its own certificate (also signed by that CA).
+    fn server_config() -> ServerConfig {
+        let verifier = WebPkiClientVerifier::builder(test_ca_roots())
+            .build()
+            .unwrap();
+        ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs(SERVER_CERT), key(SERVER_KEY))
+            .unwrap()
+    }
+
+    /// A client config that trusts our test CA for the *server's*
+    /// certificate too — otherwise every scenario below would fail during
+    /// the server's half of the handshake, before the client certificate
+    /// this file is actually testing is ever presented.
+    fn client_config(cert: Option<&ClientCert>) -> ClientConfig {
+        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let builder = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates((*test_ca_roots()).clone());
+        match cert {
+            Some(cert) => builder
+                .with_client_auth_cert(cert.chain.clone(), cert.key.clone_key())
+                .unwrap(),
+            None => builder.with_no_client_auth(),
+        }
+    }
+
+    /// Runs one handshake attempt in each direction concurrently and returns
+    /// whether each side thought it succeeded.
+    async fn attempt(client_cert: Option<&ClientCert>) -> (io::Result<()>, io::Result<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config()));
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            acceptor.accept(tcp).await.map(|_| ())
+        });
+
+        let connector = TlsConnector::from(Arc::new(client_config(client_cert)));
+        let name = ServerName::try_from("localhost").unwrap();
+        let client_result = async {
+            let tcp = TcpStream::connect(("127.0.0.1", port)).await?;
+            connector.connect(name, tcp).await.map(|_| ())
+        }
+        .await;
+
+        let server_result = server.await.unwrap();
+        (client_result, server_result)
+    }
+
+    #[tokio::test]
+    async fn tls_connector_with_cert_builds_successfully_for_a_valid_certificate() {
+        let cert = ClientCert::from_pem(format!("{CLIENT_CERT}\n{CLIENT_KEY}").as_bytes()).unwrap();
+        assert!(super::tls_connector_with_cert(&cert).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_client_certificate_lets_a_real_mutual_tls_handshake_succeed() {
+        let cert = ClientCert::from_pem(format!("{CLIENT_CERT}\n{CLIENT_KEY}").as_bytes()).unwrap();
+        let (client_result, server_result) = attempt(Some(&cert)).await;
+        assert!(client_result.is_ok(), "{client_result:?}");
+        assert!(server_result.is_ok(), "{server_result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_certificate_from_an_untrusted_ca_is_refused_by_the_server() {
+        let cert = ClientCert::from_pem(format!("{OTHER_CERT}\n{OTHER_KEY}").as_bytes()).unwrap();
+        let (_, server_result) = attempt(Some(&cert)).await;
+        assert!(server_result.is_err(), "the server must not accept it");
+    }
+
+    #[tokio::test]
+    async fn no_client_certificate_is_refused_by_a_server_that_requires_one() {
+        let (_, server_result) = attempt(None).await;
+        assert!(server_result.is_err());
     }
 }
