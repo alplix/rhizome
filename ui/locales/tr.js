@@ -31,6 +31,18 @@ export default {
   "confirm.clear_ok": "Geçmişi sil",
   "confirm.clear_title": "Geçmiş temizlensin mi?",
 
+  "dcc.accept": "Kabul et",
+  "dcc.decline": "Reddet",
+  "dcc.declined": "{filename}: reddedildi",
+  "dcc.failed": "{filename}: {reason}",
+  "dcc.offer_incoming": "{peer}, sana {filename} ({size}) göndermek istiyor",
+  "dcc.offer_outgoing": "{filename} ({size}) dosyası {peer} kullanıcısına sunuluyor",
+  "dcc.offer_passive": "{peer}, sana {filename} ({size}) göndermek istiyor, ancak bu mümkün değil: bu istemci ters DCC'yi desteklemiyor",
+  "dcc.received": "{filename}: alındı",
+  "dcc.receiving": "{filename} alınıyor… %{percent}",
+  "dcc.sending": "{filename} gönderiliyor… %{percent}",
+  "dcc.sent": "{filename}: gönderildi",
+
   "density.comfortable": "Rahat",
   "density.compact": "Sıkı",
 
@@ -76,6 +88,7 @@ export default {
   "header.server": "{name} · sunucu mesajları",
 
   "help.clear": "bu konuşmanın geçmişini sil",
+  "help.dcc": "bir dosya göndermeyi teklif et",
   "help.escape": "/ ile başlayan bir mesaj gönder",
   "help.join": "kanallara katıl",
   "help.me": "bir eylem",

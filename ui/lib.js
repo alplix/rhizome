@@ -172,6 +172,20 @@ export function formatTime(ms, hour12 = false) {
   return `${d.getHours() % 12 || 12}:${pad(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
 }
 
+// A byte count as a person would say it: whole numbers below 1000, one
+// decimal place above, the smallest unit that keeps the number under 1000.
+export function formatBytes(n) {
+  if (n < 1000) return `${n} B`;
+  const units = ["kB", "MB", "GB", "TB"];
+  let value = n / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
 export function sameDay(a, b) {
   const [x, y] = [new Date(a), new Date(b)];
   return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
@@ -200,6 +214,7 @@ export const HELP = [
   ["/whois nick", "help.whois"],
   ["/search words", "help.search"],
   ["/clear", "help.clear"],
+  ["/dcc send nick path", "help.dcc"],
   ["/quit", "help.quit"],
   ["/raw LINE", "help.raw"],
   ["//text", "help.escape"],
@@ -294,6 +309,13 @@ export function parseInput(line, context = {}) {
       return inBuffer
         ? { type: "clear" }
         : { type: "error", key: "err.conversation_only", params: { command: "/clear" } };
+    case "dcc": {
+      const usage = () => need("/dcc send nick path");
+      if (words.length < 3 || words[0].toLowerCase() !== "send") return usage();
+      const target = words[1];
+      const path = rest.trim().slice(4).trim().slice(target.length).trim();
+      return path ? { type: "dcc_send", target, path } : usage();
+    }
     case "help":
     case "?":
       return { type: "help" };

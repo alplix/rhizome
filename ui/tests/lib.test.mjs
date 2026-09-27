@@ -11,6 +11,7 @@ import {
   nickHue,
   sameDay,
   formatTime,
+  formatBytes,
   parseInput,
   completeNick,
 } from "../lib.js";
@@ -238,6 +239,24 @@ test("raw, search, quit and help", () => {
   assert.deepEqual(parseInput("/JOIN #A", chan), { type: "join", channels: ["#A"] }, "commands are case-insensitive");
 });
 
+test("dcc send takes a nick and a path, spaces and all", () => {
+  assert.deepEqual(parseInput("/dcc send bob report.pdf", chan), {
+    type: "dcc_send",
+    target: "bob",
+    path: "report.pdf",
+  });
+  // The path is everything after the nick, not re-split on its own spaces.
+  assert.deepEqual(parseInput("/dcc send bob C:\\Users\\alp\\My Documents\\report.pdf", chan), {
+    type: "dcc_send",
+    target: "bob",
+    path: "C:\\Users\\alp\\My Documents\\report.pdf",
+  });
+  assert.equal(parseInput("/dcc", chan).type, "error");
+  assert.equal(parseInput("/dcc send bob", chan).type, "error", "no path");
+  assert.equal(parseInput("/dcc chat bob", chan).type, "error", "only send is supported");
+  assert.deepEqual(parseInput("/DCC SEND bob x.txt", chan), { type: "dcc_send", target: "bob", path: "x.txt" });
+});
+
 test("commands in the server buffer have no channel to act on", () => {
   const server = { buffer: "*", isChannel: false };
   assert.equal(parseInput("/topic", server).type, "error");
@@ -297,6 +316,19 @@ test("editing the text between presses starts a fresh completion", () => {
 // ---- formatting codes ------------------------------------------------------------
 
 import { stripFormatting } from "../lib.js";
+
+test("formatBytes says a size the way a person would", () => {
+  assert.equal(formatBytes(0), "0 B");
+  assert.equal(formatBytes(999), "999 B");
+  assert.equal(formatBytes(1000), "1.0 kB");
+  assert.equal(formatBytes(1_500), "1.5 kB");
+  assert.equal(formatBytes(23_000), "23 kB");
+  assert.equal(formatBytes(999_999), "1000 kB");
+  assert.equal(formatBytes(1_000_000), "1.0 MB");
+  assert.equal(formatBytes(4_200_000), "4.2 MB");
+  assert.equal(formatBytes(1_000_000_000), "1.0 GB");
+  assert.equal(formatBytes(1_000_000_000_000), "1.0 TB");
+});
 
 test("stripFormatting removes IRC control codes and keeps the words", () => {
   assert.equal(stripFormatting("\x02bold\x02 and \x0304,08red on yellow\x03 and \x1ditalic\x0f"), "bold and red on yellow and italic");

@@ -52,6 +52,9 @@ export function ensureNetwork(state, id, name = id) {
       collapsed: false,
       buffers: new Map(),
       order: [],
+      // DCC transfers by id, so a later progress/done/failed event can find
+      // and update the same object a "dcc_offer" line is already showing.
+      transfers: new Map(),
     };
     state.networks.set(id, net);
     ensureBuffer(net, SERVER, "server");
@@ -405,6 +408,56 @@ export function applyEnvelope(state, envelope, now = Date.now()) {
     case "ctcp":
       say(t(event.reply ? "sys.ctcp_reply" : "sys.ctcp_request", { command: event.command, from: event.from }));
       break;
+
+    // A DCC SEND, in either direction. One line, in the conversation with
+    // whoever is on the other end, updated in place as it progresses rather
+    // than adding a new line for every tick of it.
+    case "dcc_offer": {
+      const buffer = ensureBuffer(net, event.peer);
+      const transfer = {
+        id: event.id,
+        direction: event.direction, // "send" | "receive"
+        peer: event.peer,
+        filename: event.filename,
+        size: event.size,
+        sent: 0,
+        passive: event.passive,
+        status: "offered", // offered | active | done | failed | declined
+        path: null,
+        reason: null,
+      };
+      net.transfers.set(event.id, transfer);
+      const chat = event.direction === "receive";
+      pushLine(state, net, buffer, { kind: "dcc", time: now, transfer }, { counts: chat, highlight: chat });
+      if (chat) effects.push({ type: "incoming", network: net.id, key: buffer.key, message: { plain: event.filename } });
+      break;
+    }
+    case "dcc_progress": {
+      const transfer = net.transfers.get(event.id);
+      if (transfer) {
+        transfer.status = "active";
+        transfer.sent = event.sent;
+        transfer.size = event.total;
+      }
+      break;
+    }
+    case "dcc_done": {
+      const transfer = net.transfers.get(event.id);
+      if (transfer) {
+        transfer.status = "done";
+        transfer.sent = transfer.size;
+        transfer.path = event.path ?? null;
+      }
+      break;
+    }
+    case "dcc_failed": {
+      const transfer = net.transfers.get(event.id);
+      if (transfer) {
+        transfer.status = "failed";
+        transfer.reason = event.reason;
+      }
+      break;
+    }
 
     // Joins, parts, quits, kicks, nick and topic changes are written as event
     // lines by the backend. Here they only keep the member list and the topic

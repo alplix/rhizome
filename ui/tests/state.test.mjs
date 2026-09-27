@@ -603,3 +603,87 @@ test("a failed login says the saved password was removed only when it was", () =
   send(state, { type: "auth_failed", reason: "bad (904)", forgot_password: false });
   assert.doesNotMatch(state.toast.text, /saved password/);
 });
+
+// ---- DCC file transfer ---------------------------------------------------------
+
+const dccOffer = (over = {}) => ({
+  type: "dcc_offer",
+  id: "1",
+  direction: "receive",
+  peer: "dave",
+  filename: "report.pdf",
+  size: 1_048_576,
+  passive: false,
+  ...over,
+});
+
+test("an incoming offer opens a conversation with whoever sent it and counts as unread", () => {
+  const state = createState();
+  ensureNetwork(state, NET);
+  send(state, dccOffer());
+  const buffer = findBuffer(state, NET, "dave");
+  assert.equal(buffer.kind, "query");
+  assert.equal(buffer.lines.length, 1);
+  assert.equal(buffer.lines[0].kind, "dcc");
+  const transfer = buffer.lines[0].transfer;
+  assert.deepEqual(
+    [transfer.direction, transfer.peer, transfer.filename, transfer.size, transfer.status, transfer.passive],
+    ["receive", "dave", "report.pdf", 1_048_576, "offered", false],
+  );
+  assert.equal(buffer.unread, 1, "an incoming offer asks for attention like a message would");
+});
+
+test("offering to send a file is not unread — nobody needs to be told about their own action", () => {
+  const state = createState();
+  ensureNetwork(state, NET);
+  send(state, dccOffer({ direction: "send", peer: "dave" }));
+  assert.equal(findBuffer(state, NET, "dave").unread, 0);
+});
+
+test("progress, success and failure update the same transfer object in place", () => {
+  const state = createState();
+  const net = ensureNetwork(state, NET);
+  send(state, dccOffer());
+  const transfer = findBuffer(state, NET, "dave").lines[0].transfer;
+
+  send(state, { type: "dcc_progress", id: "1", sent: 500_000, total: 1_048_576 });
+  assert.equal(transfer.status, "active");
+  assert.equal(transfer.sent, 500_000);
+  assert.equal(net.transfers.get("1"), transfer, "found by id, not a copy");
+
+  send(state, { type: "dcc_done", id: "1", path: "/home/alp/Downloads/report.pdf" });
+  assert.equal(transfer.status, "done");
+  assert.equal(transfer.sent, transfer.size, "a finished transfer reads as fully sent");
+  assert.equal(transfer.path, "/home/alp/Downloads/report.pdf");
+});
+
+test("a failed transfer keeps its reason and does not touch other transfers", () => {
+  const state = createState();
+  ensureNetwork(state, NET);
+  send(state, dccOffer({ id: "1" }));
+  send(state, dccOffer({ id: "2", filename: "other.bin" }));
+
+  send(state, { type: "dcc_failed", id: "1", reason: "the connection closed after 10 of 1048576 bytes" });
+  const one = findBuffer(state, NET, "dave").lines[0].transfer;
+  const two = findBuffer(state, NET, "dave").lines[1].transfer;
+  assert.equal(one.status, "failed");
+  assert.equal(one.reason, "the connection closed after 10 of 1048576 bytes");
+  assert.equal(two.status, "offered", "unrelated to the one that failed");
+});
+
+test("progress for an id nobody offered is ignored, not a crash", () => {
+  const state = createState();
+  ensureNetwork(state, NET);
+  assert.doesNotThrow(() => {
+    send(state, { type: "dcc_progress", id: "nonexistent", sent: 1, total: 1 });
+    send(state, { type: "dcc_done", id: "nonexistent", path: null });
+    send(state, { type: "dcc_failed", id: "nonexistent", reason: "x" });
+  });
+});
+
+test("a DCC offer does not count toward the conversation's last chat time", () => {
+  const state = inChannel();
+  chat(state, { msgid: "a", time_ms: 100 });
+  send(state, dccOffer({ peer: "#rhizome" }), NET);
+  assert.equal(lastChatTime(channel(state)), 100);
+});

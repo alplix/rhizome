@@ -280,6 +280,28 @@ export function createMock() {
     "#kernel": [{ nick: "alp", prefixes: "" }, { nick: "kernelhacker", prefixes: "@" }, { nick: "bob", prefixes: "" }],
   };
 
+  // ---- DCC file transfer -------------------------------------------------
+  // There is no real socket or filesystem here, so a "transfer" is just a
+  // believable sequence of the same events the real backend would send.
+  let nextTransferId = 1;
+  const pendingOffers = new Map(); // id -> { peer, filename, size }
+
+  function simulateTransfer(network, id, size, { path = null } = {}) {
+    const steps = 6;
+    for (let i = 1; i <= steps; i++) {
+      later((i * 400) / steps + i * 60, () =>
+        emit(network, { type: "dcc_progress", id, sent: Math.round((size * i) / steps), total: size }),
+      );
+    }
+    later(500, () => emit(network, { type: "dcc_done", id, path }));
+  }
+
+  function offerIncoming(network, peer, filename, size) {
+    const id = String(nextTransferId++);
+    pendingOffers.set(id, { peer, filename, size });
+    emit(network, { type: "dcc_offer", id, direction: "receive", peer, filename, size, passive: false });
+  }
+
   function join(channel) {
     emit(NETWORK, { type: "joined", channel });
     happen(channel, "alp", "join", [], true);
@@ -385,6 +407,7 @@ export function createMock() {
         emit(id, { type: "server", text: "Welcome to the demo network. Nothing here is real." });
         for (const channel of profile.channels) join(channel);
         startChatter();
+        later(4000, () => offerIncoming(id, "dave", "roadmap.pdf", 182_884));
       });
     },
     disconnect: async (id) => {
@@ -411,6 +434,25 @@ export function createMock() {
     },
     setNick: async (network, nick) => emit(network, { type: "nick_changed", old: "alp", new: nick, channels: Object.keys(members), own: true }),
     raw: async (network, line) => emit(network, { type: "server", text: `(demo) sent: ${line}` }),
+
+    dccSend: async (network, target, path) => {
+      if (!running.has(network)) throw new Error(`${network} is not connected`);
+      const filename = path.split(/[/\\]/).pop() || path;
+      const id = String(nextTransferId++);
+      const size = 65_536 + Math.floor(Math.random() * 500_000);
+      emit(network, { type: "dcc_offer", id, direction: "send", peer: target, filename, size, passive: false });
+      simulateTransfer(network, id, size);
+      return id;
+    },
+    dccAccept: async (id) => {
+      const offer = pendingOffers.get(id);
+      if (!offer) throw new Error("that offer is no longer available");
+      pendingOffers.delete(id);
+      simulateTransfer(NETWORK, id, offer.size, { path: `(demo) downloads/${offer.filename}` });
+    },
+    dccDecline: async (id) => {
+      if (!pendingOffers.delete(id)) throw new Error("that offer is no longer available");
+    },
 
     scrollback: async (network, buffer, before, limit) => {
       let rows = log.filter((r) => key(r.buffer) === key(buffer)).sort(byTime);

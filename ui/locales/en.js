@@ -30,6 +30,18 @@ export default {
   "confirm.clear_ok": "Delete history",
   "confirm.clear_title": "Clear history?",
 
+  "dcc.accept": "Accept",
+  "dcc.decline": "Decline",
+  "dcc.declined": "{filename}: declined",
+  "dcc.failed": "{filename}: {reason}",
+  "dcc.offer_incoming": "{peer} wants to send you {filename} ({size})",
+  "dcc.offer_outgoing": "Offering {filename} ({size}) to {peer}",
+  "dcc.offer_passive": "{peer} wants to send you {filename} ({size}), but cannot: this client does not support reverse DCC",
+  "dcc.received": "{filename}: received",
+  "dcc.receiving": "Receiving {filename}… {percent}%",
+  "dcc.sending": "Sending {filename}… {percent}%",
+  "dcc.sent": "{filename}: sent",
+
   "density.comfortable": "Comfortable",
   "density.compact": "Compact",
 
@@ -75,6 +87,7 @@ export default {
   "header.server": "{name} · server messages",
 
   "help.clear": "delete this conversation's history",
+  "help.dcc": "offer to send a file",
   "help.escape": "send a message that starts with /",
   "help.join": "join channels",
   "help.me": "an action",

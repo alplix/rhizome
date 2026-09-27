@@ -9,7 +9,7 @@
 
 import { describeEvent } from "./events.js";
 import { t } from "./i18n.js";
-import { formatDay, formatTime, linkify, nickHue, readableOn, sameDay, splitInlineCode } from "./lib.js";
+import { formatBytes, formatDay, formatTime, linkify, nickHue, readableOn, sameDay, splitInlineCode } from "./lib.js";
 
 // How times and days are written, set by the application from the person's
 // settings.
@@ -135,6 +135,67 @@ export function renderSystemLine(line) {
   return row;
 }
 
+function dccPercent(transfer) {
+  return transfer.size > 0 ? Math.min(100, Math.round((transfer.sent / transfer.size) * 100)) : 0;
+}
+
+// A DCC transfer: one line, its content replaced wholesale on every render
+// (there are never enough of these on screen at once for that to matter),
+// so it always reflects the transfer object's current state.
+export function renderDccLine(line) {
+  const transfer = line.transfer;
+  const row = el("div", `line dcc ${transfer.status}`);
+  row.dataset.transferId = transfer.id;
+  row.appendChild(timeElement(line.time));
+
+  const body = el("div", "dcc-body");
+  const label = el("span", "text");
+  const named = { peer: transfer.peer, filename: transfer.filename, size: formatBytes(transfer.size) };
+  if (transfer.status === "offered" && transfer.direction === "receive" && transfer.passive) {
+    label.textContent = t("dcc.offer_passive", named);
+  } else if (transfer.status === "offered" && transfer.direction === "receive") {
+    label.textContent = t("dcc.offer_incoming", named);
+  } else if (transfer.status === "offered") {
+    label.textContent = t("dcc.offer_outgoing", named);
+  } else if (transfer.status === "active" && transfer.direction === "receive") {
+    label.textContent = t("dcc.receiving", { filename: transfer.filename, percent: dccPercent(transfer) });
+  } else if (transfer.status === "active") {
+    label.textContent = t("dcc.sending", { filename: transfer.filename, percent: dccPercent(transfer) });
+  } else if (transfer.status === "done" && transfer.direction === "receive") {
+    label.textContent = t("dcc.received", { filename: transfer.filename });
+  } else if (transfer.status === "done") {
+    label.textContent = t("dcc.sent", { filename: transfer.filename });
+  } else if (transfer.status === "failed") {
+    label.textContent = t("dcc.failed", { filename: transfer.filename, reason: transfer.reason });
+  } else if (transfer.status === "declined") {
+    label.textContent = t("dcc.declined", { filename: transfer.filename });
+  }
+  body.appendChild(label);
+
+  if (transfer.status === "active") {
+    const bar = el("div", "dcc-bar");
+    const fill = el("div", "dcc-bar-fill");
+    fill.style.width = `${dccPercent(transfer)}%`;
+    bar.appendChild(fill);
+    body.appendChild(bar);
+  }
+
+  if (transfer.status === "offered" && transfer.direction === "receive" && !transfer.passive) {
+    const actions = el("div", "dcc-actions");
+    const accept = el("button", "quiet", t("dcc.accept"));
+    accept.type = "button";
+    accept.dataset.dccAction = "accept";
+    const decline = el("button", "quiet", t("dcc.decline"));
+    decline.type = "button";
+    decline.dataset.dccAction = "decline";
+    actions.append(accept, decline);
+    body.appendChild(actions);
+  }
+
+  row.appendChild(body);
+  return row;
+}
+
 const lineTime = (line) => (line.kind === "message" ? line.message.time_ms : line.time);
 
 // Renders lines with a divider whenever the day changes. `previousTime` is the
@@ -154,7 +215,11 @@ export function renderLines(lines, { unreadFrom = null, targetId = null, previou
       fragment.appendChild(el("div", "unread-marker", t("messages.new_marker")));
     }
     fragment.appendChild(
-      line.kind === "message" ? renderMessageLine(line.message, { targetId }) : renderSystemLine(line),
+      line.kind === "message"
+        ? renderMessageLine(line.message, { targetId })
+        : line.kind === "dcc"
+          ? renderDccLine(line)
+          : renderSystemLine(line),
     );
     last = time;
   });

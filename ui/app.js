@@ -774,6 +774,11 @@ function onEnvelope(envelope) {
     if (["names", "member_joined", "member_parted", "member_kicked", "member_quit", "nick_changed", "joined", "parted", "kicked"].includes(type)) {
       renderMembers();
     }
+    // A DCC transfer's line is already on screen; its progress, not its
+    // count, changed, so it needs redrawing rather than appending.
+    if (["dcc_progress", "dcc_done", "dcc_failed"].includes(type)) {
+      renderAll({ scroll: "same" });
+    }
   }
   if (active && active === before) appendNew(active);
   if (state.toast) {
@@ -842,6 +847,9 @@ async function runAction(action, net, buffer) {
     case "raw":
       await api.raw(net.id, action.line);
       return true;
+    case "dcc_send":
+      await api.dccSend(net.id, action.target, action.path);
+      return true;
     case "search":
       openSearch(action.query);
       return true;
@@ -880,7 +888,7 @@ async function submit() {
   }
   const action = parseInput(text, { buffer: buffer.kind === "server" ? SERVER : buffer.name, isChannel: buffer.kind === "channel" });
   if (!action) return;
-  if (["message", "action", "notice", "query", "join", "part", "nick", "raw"].includes(action.type) && net.status !== "registered") {
+  if (["message", "action", "notice", "query", "join", "part", "nick", "raw", "dcc_send"].includes(action.type) && net.status !== "registered") {
     toast(t("toast.not_connected", { name: net.name }), "error");
     return;
   }
@@ -1274,9 +1282,30 @@ function bindEvents() {
     if (key !== undefined) activate(network, key);
   });
 
-  $("messages").addEventListener("click", (event) => {
+  $("messages").addEventListener("click", async (event) => {
     const nick = event.target.closest?.("button.nick");
-    if (nick) insertAtCaret(`${nick.dataset.nick}: `);
+    if (nick) {
+      insertAtCaret(`${nick.dataset.nick}: `);
+      return;
+    }
+    const dccButton = event.target.closest?.("[data-dcc-action]");
+    if (dccButton) {
+      const id = dccButton.closest(".line.dcc").dataset.transferId;
+      try {
+        if (dccButton.dataset.dccAction === "accept") await api.dccAccept(id);
+        else {
+          await api.dccDecline(id);
+          const net = state.networks.get(state.active.network);
+          const transfer = net?.transfers.get(id);
+          if (transfer) {
+            transfer.status = "declined";
+            renderAll({ scroll: "same" });
+          }
+        }
+      } catch (error) {
+        fail(error);
+      }
+    }
   });
   $("messages").addEventListener("scroll", () => {
     const box = messagesBox();
