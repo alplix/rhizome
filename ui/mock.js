@@ -204,6 +204,7 @@ function seedHistory(network, now) {
 const DEFAULT_SETTINGS = {
   theme: "system", accent: "theme", density: "comfortable", font_size: "medium",
   language: "auto", time_format: "24h", show_events: true, notifications: true,
+  close_to_tray: true,
 };
 
 export function createMock() {

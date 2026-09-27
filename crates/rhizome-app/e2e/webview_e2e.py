@@ -18,9 +18,11 @@ rhizome-app`:
 
 Set RHIZOME_EXE to test another build, e.g. the release executable.
 
-It uses the application's real data directories and removes them when it
-finishes; it refuses to start if they already exist, so it can never touch
-someone's real profiles or message log.
+It runs the application against a throwaway directory (the `RHIZOME_DATA_DIR`
+environment variable, which the application only honours when set — see
+`lib.rs`), never the real `%APPDATA%\\org.rhizome.irc`, so it cannot touch, or
+even see, someone's real profiles, log or settings, however many are already
+saved there.
 """
 
 import base64
@@ -32,6 +34,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -39,11 +42,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 EXE = Path(os.environ.get("RHIZOME_EXE") or ROOT / "target" / "debug" / "rhizome.exe")
-IDENTIFIER = "org.rhizome.irc"
-DATA_DIRS = [
-    Path(os.environ.get("APPDATA", "")) / IDENTIFIER,
-    Path(os.environ.get("LOCALAPPDATA", "")) / IDENTIFIER,
-]
+DATA_DIR = Path(tempfile.mkdtemp(prefix="rhizome-e2e-"))
 CDP_PORT = 9333
 
 results = []
@@ -210,6 +209,7 @@ class Page:
 def launch():
     env = dict(os.environ)
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*"
+    env["RHIZOME_DATA_DIR"] = str(DATA_DIR)
     proc = subprocess.Popen([str(EXE)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + 45
     while time.time() < deadline:
@@ -240,6 +240,41 @@ def wait_for(page, expression, seconds=15):
     return False
 
 
+def close_main_window(pid, seconds=10):
+    """Sends the top-level window of `pid` a real WM_CLOSE, as Windows does
+    when the X button is clicked or Alt+F4 is pressed — not something routed
+    through the webview or any of its permissions at all."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    WM_CLOSE = 0x0010
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        owner_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value != pid:
+            return True
+        # Matched by title, not IsWindowVisible: the second call in this test
+        # targets the window again after it was hidden, not closed.
+        title = ctypes.create_unicode_buffer(64)
+        user32.GetWindowTextW(hwnd, title, 64)
+        if title.value == "Rhizome":
+            found.append(hwnd)
+        return True
+
+    deadline = time.time() + seconds
+    while time.time() < deadline and not found:
+        user32.EnumWindows(callback, 0)
+        if not found:
+            time.sleep(0.2)
+    if not found:
+        raise RuntimeError(f"no visible top-level window found for pid {pid}")
+    user32.PostMessageW(found[0], WM_CLOSE, 0, 0)
+
+
 def stop(proc):
     proc.kill()
     try:
@@ -252,9 +287,6 @@ def stop(proc):
 def main():
     if not EXE.exists():
         sys.exit(f"build first: {EXE} does not exist")
-    for d in DATA_DIRS:
-        if d.exists():
-            sys.exit(f"refusing to run: {d} already exists and may hold real data")
 
     irc = FakeIrc()
     irc.start()
@@ -391,8 +423,8 @@ def main():
         proc = None
 
         # ---- second run: everything survives a restart -----------------------------------------------
-        check("the message log is a file on disk", (DATA_DIRS[0] / "rhizome.sqlite3").exists())
-        check("the profile file holds no password", "password" not in (DATA_DIRS[0] / "profiles.json").read_text().lower())
+        check("the message log is a file on disk", (DATA_DIR / "rhizome.sqlite3").exists())
+        check("the profile file holds no password", "password" not in (DATA_DIR / "profiles.json").read_text().lower())
 
         proc, page, _ = launch()
         check("the saved network is there after a restart", wait_for(page, "window.__rhizome.state.networks.has('e2e')"))
@@ -402,7 +434,7 @@ def main():
         check("the saved language is applied", wait_for(page, "document.documentElement.lang === 'tr'"))
         unread_after = page.evaluate("window.__rhizome.api.buffers('e2e').then(b => b.find(x => x.name === '#e2e').unread)")
         check("the read marker survives a restart", unread_after == 0, str(unread_after))
-        check("the settings file is plain JSON on disk", json.loads((DATA_DIRS[0] / "settings.json").read_text())["theme"] == "paper")
+        check("the settings file is plain JSON on disk", json.loads((DATA_DIR / "settings.json").read_text())["theme"] == "paper")
         history = page.evaluate("window.__rhizome.api.scrollback('e2e', '#e2e', null, 50).then(m => m.map(x => x.sender + ': ' + x.plain))")
         check("the conversation is read back from disk", any("fake server" in h for h in history) and any("merhaba" in h for h in history), str(history))
         found = page.evaluate("window.__rhizome.api.search('hello from:bob', null, false, 10).then(h => h.length)")
@@ -411,11 +443,36 @@ def main():
         # be searched for, not obeyed.
         literal = page.evaluate("window.__rhizome.api.search('hello OR nonexistentword', null, false, 10).then(h => h.length)")
         check("a query cannot use FTS5 operators", literal == 0, str(literal))
+
+        # ---- closing the window: to the tray by default, for real when asked -------------------
+        # A real WM_CLOSE, exactly what the OS sends when the X button is
+        # clicked — not a JS call, so this needs no extra capability and
+        # proves the native close handler itself, not a script's ability to
+        # ask for one.
+        # "Close to tray" is on by default (untouched by the settings test above,
+        # which only changed theme/accent/language), so asking the real window to
+        # close must hide it rather than end the process.
+        close_main_window(proc.pid)
+        time.sleep(1.5)
+        check("closing the window with \"close to tray\" on does not end the process", proc.poll() is None)
+        check("the webview is still alive behind it, not destroyed", page.evaluate("1 + 1") == 2)
+
+        # Turning it off makes the same close button really quit.
+        page.evaluate(
+            "window.__rhizome.api.getSettings().then(s => window.__rhizome.api.saveSettings({...s, close_to_tray: false}))"
+        )
+        wait_for(page, "window.__rhizome.api.getSettings().then(s => s.close_to_tray === false)")
+        close_main_window(proc.pid)
+        try:
+            proc.wait(timeout=10)
+            check("closing the window with \"close to tray\" off really quits", True)
+        except subprocess.TimeoutExpired:
+            check("closing the window with \"close to tray\" off really quits", False, "process outlived the close request")
+        proc = None
     finally:
         if proc:
             stop(proc)
-        for d in DATA_DIRS:
-            shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")

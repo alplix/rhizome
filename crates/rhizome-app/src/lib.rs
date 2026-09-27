@@ -34,11 +34,16 @@ pub mod secrets;
 pub mod settings;
 pub mod storehost;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rhizome_client::MessageKind;
 use rhizome_store::Store;
 use serde::Serialize;
+#[cfg(desktop)]
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+#[cfg(desktop)]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State, Url};
 use tokio::sync::mpsc;
 
@@ -414,7 +419,8 @@ fn open_store(path: &std::path::Path, notices: &mut Vec<String>) -> Store {
     }
 }
 
-/// Brings the existing window forward when a second copy is started.
+/// Brings the existing window forward when a second copy is started, or when
+/// the tray icon asks to see it again.
 #[cfg(desktop)]
 fn focus_existing_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -422,6 +428,27 @@ fn focus_existing_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Says goodbye to every connected network and then really exits, unlike
+/// closing the window with "close to tray" on, which only hides it.
+///
+/// Disconnecting only *asks* the engine to send `QUIT` and stop; a process
+/// exit right behind it would race that, so the exit is delayed just long
+/// enough for the line to reach the socket, and skipped entirely when there
+/// was nothing to say goodbye to.
+#[cfg(desktop)]
+fn quit_gracefully(app: tauri::AppHandle) {
+    let ids = app.state::<AppState>().core.connected_ids();
+    for id in &ids {
+        let _ = app.state::<AppState>().core.disconnect(id);
+    }
+    tauri::async_runtime::spawn(async move {
+        if !ids.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        app.exit(0);
+    });
 }
 
 /// Starts the application.
@@ -443,7 +470,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            let dir = app.path().app_data_dir()?;
+            // The end-to-end test points this at a throwaway directory, so it
+            // never has to touch (or refuse to run because of) a person's
+            // real profiles and log.
+            let dir = match std::env::var_os("RHIZOME_DATA_DIR") {
+                Some(path) => PathBuf::from(path),
+                None => app.path().app_data_dir()?,
+            };
             let mut notices = Vec::new();
 
             let (_, settings_note) = SettingsStore::new(dir.join("settings.json")).load();
@@ -483,7 +516,7 @@ pub fn run() {
                 notices,
             });
 
-            tauri::WebviewWindowBuilder::new(
+            let mut window_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -491,8 +524,70 @@ pub fn run() {
             .title("Rhizome")
             .inner_size(1200.0, 780.0)
             .min_inner_size(720.0, 480.0)
-            .on_navigation(is_app_url)
-            .build()?;
+            .on_navigation(is_app_url);
+            // Along with the data directory above, keeps the end-to-end test's
+            // webview cache out of a real profile's WebView2 data too.
+            if std::env::var_os("RHIZOME_DATA_DIR").is_some() {
+                window_builder = window_builder.data_directory(dir.join("webview"));
+            }
+            let window = window_builder.build()?;
+
+            // Closing the window normally (the X button, Alt+F4, Cmd+Q) hides
+            // it and keeps every network connected, unless the person has
+            // turned that off in Settings — in which case this is a real
+            // quit, and it says goodbye properly rather than just vanishing.
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let close_to_tray =
+                            handle.state::<AppState>().settings.load().0.close_to_tray;
+                        if close_to_tray {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        } else {
+                            quit_gracefully(handle.clone());
+                        }
+                    }
+                });
+            }
+
+            // The tray icon is how a hidden window (or a network still
+            // running in the background) is reached again.
+            #[cfg(desktop)]
+            {
+                let show = MenuItemBuilder::with_id("show", "Show Rhizome").build(app)?;
+                let quit = MenuItemBuilder::with_id("quit", "Quit Rhizome").build(app)?;
+                let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+                let mut tray = TrayIconBuilder::with_id("main")
+                    .menu(&menu)
+                    .tooltip("Rhizome")
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => focus_existing_window(app),
+                        "quit" => quit_gracefully(app.clone()),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            focus_existing_window(tray.app_handle());
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    tray = tray.icon(icon.clone());
+                }
+                tray.build(app)?;
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

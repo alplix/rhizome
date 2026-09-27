@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 [Semantic Versioning](https://semver.org/) once 1.0 is reached; until then a
 minor version may change things.
 
+## [0.4.0] — 2026-09-27
+
+### Added
+- **Close to tray.** By default, closing the window (X, Alt+F4, Cmd+Q) hides
+  it to a new tray icon instead of quitting; every network stays connected.
+  The tray icon's menu shows the window again or quits for real. A new
+  Settings → Behaviour toggle turns this off, in which case closing the
+  window disconnects from every network properly (a real `QUIT`, with a short
+  grace period for it to reach the wire) before the process exits, instead of
+  just killing it. Verified against the real window with an actual `WM_CLOSE`,
+  not a script call.
+- Search now finds a message regardless of whether it (or the query) used a
+  plain `i` or Turkish's dotless `ı`: "hatayi" finds "hatayı" and back again,
+  and the result still shows the real text. Closes the "dotless ı" item under
+  *Known limitations*.
+
+### Changed
+- `crates/rhizome-app/e2e/webview_e2e.py` now runs against a throwaway
+  directory (`RHIZOME_DATA_DIR`) instead of the application's real data
+  directory, so it can never see or touch a real profile, log or settings
+  file. Previously it refused to run at all if that directory already
+  existed; it no longer needs to.
+
 ## [0.3.0] — 2026-09-27
 
 ### Added

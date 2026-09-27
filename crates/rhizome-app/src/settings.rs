@@ -93,6 +93,9 @@ pub struct Settings {
     /// Tell the desktop about mentions and private messages while the window is
     /// in the background.
     pub notifications: bool,
+    /// Closing the window hides it to the system tray, keeping every network
+    /// connected, instead of quitting the application.
+    pub close_to_tray: bool,
 }
 
 impl Default for Settings {
@@ -106,6 +109,7 @@ impl Default for Settings {
             time_format: TimeFormat::default(),
             show_events: true,
             notifications: true,
+            close_to_tray: true,
         }
     }
 }
@@ -132,6 +136,7 @@ impl Settings {
             time_format: field(value, "time_format"),
             show_events: flag(value, "show_events", true),
             notifications: flag(value, "notifications", true),
+            close_to_tray: flag(value, "close_to_tray", true),
         }
     }
 }
@@ -217,7 +222,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.theme, Theme::System);
         assert_eq!(s.language, Language::Auto);
-        assert!(s.show_events && s.notifications);
+        assert!(s.show_events && s.notifications && s.close_to_tray);
     }
 
     #[test]
@@ -233,6 +238,7 @@ mod tests {
             time_format: TimeFormat::H12,
             show_events: false,
             notifications: false,
+            close_to_tray: false,
         };
         store.save(&chosen).unwrap();
         assert_eq!(store.load(), (chosen, None));
@@ -273,6 +279,7 @@ mod tests {
             "language": "tr",
             "show_events": "yes",
             "notifications": false,
+            "close_to_tray": "yes",
         }));
         assert_eq!(s.theme, Theme::System, "unknown theme falls back");
         assert_eq!(s.accent, Accent::Blue, "the rest survive");
@@ -281,6 +288,7 @@ mod tests {
         assert_eq!(s.language, Language::Tr);
         assert!(s.show_events, "a non-boolean takes the default");
         assert!(!s.notifications);
+        assert!(s.close_to_tray, "a non-boolean takes the default");
     }
 
     #[test]

@@ -167,6 +167,7 @@ export default {
   "settings.accent": "Vurgu rengi",
   "settings.appearance": "Görünüm",
   "settings.behaviour": "Davranış",
+  "settings.close_to_tray": "Pencere kapatıldığında sistem tepsisinde çalışmaya devam et",
   "settings.density": "Yoğunluk",
   "settings.font_size": "Yazı boyutu",
   "settings.language": "Dil",

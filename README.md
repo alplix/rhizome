@@ -175,9 +175,11 @@ search box understands what a developer types:
 - **`snake_case` identifiers stay whole,** so `kmalloc_array` does not also match
   every message that merely mentions `array`. Use `kmalloc*` to match the family.
 - **Turkish is searchable without Turkish keys.** `dunya`, `turkce` and `cumleyi`
-  find `dünya`, `Türkçe` and `cümleyi`; capital `İ` matches `i`. One gap remains:
-  the dotless `ı` is a different letter, not an accented `i`, and is not folded,
-  so `hatayi` does not find `hatayı`. Typing `hatay*` does.
+  find `dünya`, `Türkçe` and `cümleyi`; capital `İ` matches `i`. The dotless `ı`
+  is a distinct Turkish letter, not an accented `i`, so SQLite's own tokenizer
+  cannot fold it — `hatayi` finds `hatayı` (and the reverse) because the query
+  parser tries both spellings itself wherever either letter appears, not
+  because the index was changed; the search result still shows the real text.
 - **History replays are idempotent.** A message with the same server-assigned
   id in the same buffer is stored once, so reconnecting and re-fetching
   overlapping history adds nothing.
@@ -221,6 +223,12 @@ and never raise a notification.
   nudged until they have enough contrast on the current theme.
 - **One window:** starting Rhizome again focuses the running one, and the window
   reopens where you left it.
+- **Closing the window keeps you connected.** By default the X button (or
+  Alt+F4/Cmd+Q) hides the window to a tray icon rather than quitting; every
+  network stays joined, and the tray icon's menu shows the window again or
+  quits for real. Turn this off in Settings → Behaviour if you would rather
+  the window closing end the session — that still says goodbye to every
+  server properly before the process exits, instead of just vanishing.
 
 ## Safety properties
 
@@ -341,9 +349,13 @@ That client does not write to the log; the desktop app does.
 The last one launches the actual application, drives its WebView2 page over the
 DevTools Protocol and connects it to a scripted IRC server on localhost. It is
 the only test that exercises the Tauri glue: the IPC commands, event delivery,
-the capability set, the content security policy, the navigation guard, and
-settings, read markers and the log surviving a restart. It refuses to run if the application's data
-directory already exists, so it cannot touch real data.
+the capability set, the content security policy, the navigation guard, closing
+the window to the tray versus really quitting (with a real `WM_CLOSE`, not a
+script call), and settings, read markers and the log surviving a restart. It
+runs against a throwaway directory (the `RHIZOME_DATA_DIR` environment
+variable, honoured only when set) rather than the application's real data
+directory, so it can never see or touch a real profile, log or settings file,
+however many are already saved there.
 
 ## Known limitations
 
@@ -360,7 +372,6 @@ Things that are not done, stated plainly:
   a client certificate.
 - **No way to accept a self-signed server certificate.** A server whose
   certificate does not verify cannot be connected to.
-- **Dotless `ı` is not folded in search**, as described above.
 - **No link previews and no multiline paste yet** — the paste and unfurl ideas in
   *Why build this* are the plan, not the present.
 - **Right-to-left text** has not been designed for or tested.

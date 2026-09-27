@@ -166,6 +166,7 @@ export default {
   "settings.accent": "Accent colour",
   "settings.appearance": "Appearance",
   "settings.behaviour": "Behaviour",
+  "settings.close_to_tray": "Keep running in the system tray when the window is closed",
   "settings.density": "Density",
   "settings.font_size": "Text size",
   "settings.language": "Language",

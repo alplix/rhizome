@@ -43,6 +43,7 @@ const DEFAULT_SETTINGS = {
   time_format: "24h",
   show_events: true,
   notifications: true,
+  close_to_tray: true,
 };
 
 const state = createState();
@@ -263,6 +264,7 @@ function syncSettingsControls() {
   $("s-time").value = settings.time_format;
   $("s-events").checked = settings.show_events;
   $("s-notify").checked = settings.notifications;
+  $("s-tray").checked = settings.close_to_tray;
 }
 
 async function openSettings() {
@@ -293,6 +295,8 @@ function bindSettings() {
       applySettings({ show_events: input.checked }, { save: true });
     } else if (input.id === "s-notify") {
       applySettings({ notifications: input.checked }, { save: true, rerender: false });
+    } else if (input.id === "s-tray") {
+      applySettings({ close_to_tray: input.checked }, { save: true, rerender: false });
     }
   });
   $("btn-test-notify").addEventListener("click", async () => {

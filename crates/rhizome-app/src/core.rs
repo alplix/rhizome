@@ -151,6 +151,12 @@ impl Core {
         lock(&self.inner.networks).contains_key(id)
     }
 
+    /// Every network currently connected (or connecting), for saying goodbye
+    /// to each of them before the application quits.
+    pub fn connected_ids(&self) -> Vec<String> {
+        lock(&self.inner.networks).keys().cloned().collect()
+    }
+
     fn handle(&self, id: &str) -> Result<Handle, String> {
         lock(&self.inner.networks)
             .get(id)
@@ -623,6 +629,40 @@ mod tests {
         assert!(core.is_connected("test"));
         core.disconnect("test").unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connected_ids_lists_only_networks_currently_connected() {
+        let (core, mut rx) = core();
+        let (listener_a, port_a) = listen().await;
+        let (listener_b, port_b) = listen().await;
+        // Two independent servers, each waiting on its own connection: both
+        // must be able to register before either is asked to quit.
+        let server_a = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener_a).await;
+            peer.register().await;
+            assert!(peer.line().await.starts_with("QUIT"));
+        });
+        let server_b = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener_b).await;
+            peer.register().await;
+            assert!(peer.line().await.starts_with("QUIT"));
+        });
+
+        assert_eq!(core.connected_ids(), Vec::<String>::new());
+        core.connect("a", config(port_a)).unwrap();
+        core.connect("b", config(port_b)).unwrap();
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+        until(&mut rx, |e| matches!(e, UiEvent::Registered { .. })).await;
+        let mut ids = core.connected_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_owned(), "b".to_owned()]);
+
+        core.disconnect("a").unwrap();
+        assert_eq!(core.connected_ids(), vec!["b".to_owned()]);
+        core.disconnect("b").unwrap();
+        server_a.await.unwrap();
+        server_b.await.unwrap();
     }
 
     #[tokio::test]
