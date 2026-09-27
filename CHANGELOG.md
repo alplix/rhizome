@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 [Semantic Versioning](https://semver.org/) once 1.0 is reached; until then a
 minor version may change things.
 
+## [0.6.0] — 2026-09-27
+
+### Added
+- **SASL `EXTERNAL`.** A network profile can point at a PEM file holding a
+  TLS client certificate and its private key; it is presented during the TLS
+  handshake and the account authenticates by it, no password at all. Takes
+  priority over a SASL `PLAIN` account on the same profile, which is then
+  only consulted as the `authzid` (who to act as), for a network where that
+  differs from the certificate's own identity.
+- `rhizome_client::identity::ClientCert`: reads a certificate chain and its
+  key from PEM text, in either order, cert and key together in one file or
+  from two concatenated.
+- `Config::sasl_external` / the TLS connector now presents a per-connection
+  client certificate, verified against a real mutual-TLS handshake (and a
+  certificate from an untrusted CA, and no certificate at all, both actually
+  refused by a server that requires one — not just asserted, run against a
+  real TLS server built for the test).
+
+### Known limitations
+No way yet to accept a self-signed *server* certificate — a different thing
+from presenting a client one, and still on the list.
+
 ## [0.5.0] — 2026-09-27
 
 ### Added

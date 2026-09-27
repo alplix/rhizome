@@ -272,6 +272,16 @@ QUIT` becomes chat text, never a second command; this is
   `Debug` output.
 - **SASL `PLAIN` needs TLS,** and a failed login ends the connection instead of
   retrying: repeating a wrong password risks locking the account.
+- **SASL `EXTERNAL` logs in by TLS client certificate, no password at all.**
+  Point a network's "Client certificate" field at a PEM file holding a
+  certificate and its private key — what a network's SASL `CertFP`
+  instructions usually hand you — and it is presented during the handshake
+  itself; nothing secret crosses the wire in the SASL exchange, and the file
+  is only ever read from disk, never written to it. Verified against a real
+  mutual-TLS handshake, including that a certificate from an untrusted CA is
+  refused. Only *active* client certificates: there is no way yet to accept a
+  self-signed **server** certificate (a different thing — see *Known
+  limitations*).
 - **A configured login is never silently skipped.** If SASL is requested and
   cannot be used, the connection is abandoned rather than continued
   unauthenticated.
@@ -381,8 +391,6 @@ Things that are not done, stated plainly:
 - **No Android build.** The NDK is not installed and the app crate is not set
   up as a mobile library.
 - **No auto-updater and no code signing on any platform** (see *Install*).
-- **No SASL `EXTERNAL`.** The protocol layer models it; the driver does not load
-  a client certificate.
 - **No way to accept a self-signed server certificate.** A server whose
   certificate does not verify cannot be connected to.
 - **No link previews and no multiline paste yet** — the paste and unfurl ideas in
