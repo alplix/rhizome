@@ -38,9 +38,10 @@ Installers for all three desktops are attached to each
 only, no administrator rights needed. Windows 11 already includes WebView2;
 the installer fetches it on Windows 10.
 
-**macOS:** `Rhizome_<version>_x64.dmg` (Intel; an Apple Silicon build is not
-cross-compiled yet — Rosetta 2 runs the Intel build on an M-series Mac). Open
-the disk image and drag Rhizome into Applications.
+**macOS:** `Rhizome_<version>_aarch64.dmg` (Apple Silicon / M-series only; an
+Intel build is not cross-compiled yet, and Rosetta only translates the other
+direction, so it will not run on an Intel Mac). Open the disk image and drag
+Rhizome into Applications.
 
 **Linux:** `rhizome_<version>_amd64.deb` for Debian/Ubuntu-based
 distributions, or the portable `rhizome_<version>_amd64.AppImage` for
@@ -363,8 +364,8 @@ Things that are not done, stated plainly:
 
 - **macOS and Linux are built and tested by CI, but not yet used by a person.**
   Only the Windows build has been driven end to end in its real window. No
-  Apple Silicon build (the macOS job builds Intel only; it runs on an M-series
-  Mac under Rosetta 2).
+  Intel Mac build (GitHub's `macos-latest` runner is Apple Silicon; an Intel
+  build would need cross-compiling, which is not set up).
 - **No Android build.** The NDK is not installed and the app crate is not set
   up as a mobile library.
 - **No auto-updater and no code signing on any platform** (see *Install*).
