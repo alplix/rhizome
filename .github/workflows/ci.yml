@@ -10,15 +10,29 @@ env:
 
 jobs:
   rust:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux WebView and keyring dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Formatting (once is enough)
+        if: matrix.os == 'windows-latest'
+        run: cargo fmt --check
+      - name: Clippy (once is enough)
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   ui:

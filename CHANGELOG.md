@@ -4,6 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 [Semantic Versioning](https://semver.org/) once 1.0 is reached; until then a
 minor version may change things.
 
+## [0.3.0] — 2026-09-27
+
+### Added
+- **macOS (`.dmg`) and Linux (`.deb`, AppImage) installers**, built alongside
+  the Windows one from a single tag push. `crates/rhizome-app/tauri.conf.json`
+  now bundles `"all"` targets for whichever platform builds it; the release
+  workflow builds all three explicitly and attaches a `.sha256` checksum to
+  each.
+- CI (`ci.yml`) now runs `cargo test --workspace` on Windows, macOS and Linux on
+  every push, not only Windows.
+- A full icon set generated from the 512×512 source, including macOS `.icns`.
+
+### Changed
+- Nothing in the application itself; this release is packaging only.
+
+### Known limitations
+macOS and Linux builds are new and CI-verified only (compiles, passes its
+tests) — nobody has run them by hand yet. See the README's *Known limitations*
+for the full, unchanged list otherwise.
+
 ## [0.2.0] — 2026-09-25
 
 First packaged release.

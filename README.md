@@ -8,11 +8,11 @@ shape, and the opposite of the centralised chat platforms that replaced it.
 
 ## Status
 
-Version 0.2.0: a desktop app for Windows that connects to IRC networks over
-TLS, follows channels and members, keeps a searchable log of everything it sees,
-remembers what you have read, and survives a restart. Seven themes, English and
-Turkish. It has been exercised end to end in its real window (see *Testing*),
-but it has not yet had a week of daily use.
+Version 0.3.0: a desktop app for Windows, macOS and Linux that connects to IRC
+networks over TLS, follows channels and members, keeps a searchable log of
+everything it sees, remembers what you have read, and survives a restart. Seven
+themes, English and Turkish. It has been exercised end to end in its real
+window (see *Testing*), but it has not yet had a week of daily use.
 
 | Crate | State |
 |---|---|
@@ -22,20 +22,39 @@ but it has not yet had a week of daily use.
 | `rhizome-app` | ✅ Working — Tauri v2 window joining engine and store; 81 tests + 42 end-to-end checks |
 | `ui/` | ✅ Working — plain JavaScript, no build step; 130 tests |
 
-Only **Windows** has been built and tested. The Rust code is not Windows-specific
-(the credential store has macOS and Linux back ends configured), but nothing
-else has been compiled, so treat other systems as untried.
+Every push is built and tested on Windows, macOS and Linux by CI (see the
+badge... there is no badge yet, see the Actions tab). Only **Windows** has been
+driven by a person end to end, in the real window described under *Testing*;
+the macOS and Linux installers come from the same CI matrix that runs
+`cargo test --workspace` there, but nobody has clicked through them by hand
+yet — treat them as "compiles and passes its tests" rather than "used daily".
 
 ## Install
 
-Download `Rhizome_<version>_x64-setup.exe` from the releases page and run it. It
-installs for the current user only and needs no administrator rights. Windows 11
-already includes WebView2; the installer fetches it on Windows 10.
+Installers for all three desktops are attached to each
+[release](https://github.com/alplix/rhizome/releases).
 
-**The installer is not code-signed**, so Windows SmartScreen will say the
-publisher is unknown ("More info" → "Run anyway"). Signing needs a paid
-certificate; until there is one, verify the download against the checksum
-published with the release, or build from source.
+**Windows:** `Rhizome_<version>_x64-setup.exe`. Installs for the current user
+only, no administrator rights needed. Windows 11 already includes WebView2;
+the installer fetches it on Windows 10.
+
+**macOS:** `Rhizome_<version>_x64.dmg` (Intel; an Apple Silicon build is not
+cross-compiled yet — Rosetta 2 runs the Intel build on an M-series Mac). Open
+the disk image and drag Rhizome into Applications.
+
+**Linux:** `rhizome_<version>_amd64.deb` for Debian/Ubuntu-based
+distributions, or the portable `rhizome_<version>_amd64.AppImage` for
+anything else (`chmod +x` it, then run it). Needs a WebKitGTK 4.1 runtime,
+which the `.deb` pulls in as a dependency and the AppImage bundles itself.
+
+**None of the installers are code-signed**, so:
+- Windows SmartScreen says the publisher is unknown ("More info" → "Run anyway").
+- macOS Gatekeeper refuses to open it the first time; right-click the app →
+  Open, then confirm, or `xattr -d com.apple.quarantine Rhizome.app`.
+
+Signing needs a paid certificate on both platforms; until there is one, verify a
+download against the `.sha256` checksum file published alongside it, or build
+from source.
 
 There is no auto-updater: install a newer version over the old one, and your
 networks, settings and log are kept.
@@ -241,21 +260,35 @@ QUIT` becomes chat text, never a second command; this is
 
 ## Building
 
-To produce the Windows installer (needs Node for the Tauri CLI; NSIS is fetched
-automatically):
+Needs Node (for the Tauri CLI) alongside Rust. Platform prerequisites:
+
+- **Windows:** the MSVC build tools and WebView2 (already part of Windows 11). NSIS
+  is fetched automatically.
+- **macOS:** Xcode command line tools (`xcode-select --install`).
+- **Linux:** WebKitGTK 4.1 and friends —
+  `sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev pkg-config file`
+  on Debian/Ubuntu; equivalent packages elsewhere.
+
+To produce the installer for whichever platform you are building on:
 
 ```bash
 cd crates/rhizome-app
-npx @tauri-apps/cli@2 build --bundles nsis
+npx @tauri-apps/cli@2 build
 ```
 
-The result is `target/release/bundle/nsis/Rhizome_<version>_x64-setup.exe`.
+`tauri.conf.json` sets the bundle target to `"all"`, which resolves to
+whatever the host can build: NSIS on Windows, a `.app`/`.dmg` on macOS, and a
+`.deb`/AppImage on Linux. Pass `--bundles nsis` (or `dmg`, `deb`, `appimage`) to
+build only one. The result lands under `target/release/bundle/<kind>/`.
 
-On Windows you need the MSVC build tools and WebView2 (already part of
-Windows 11). Minimum Rust versions, taken from what each crate's dependencies
-declare: `rhizome-proto` 1.75, `rhizome-client` and `rhizome-store` 1.85,
-`rhizome-app` 1.88. Only the current stable toolchain (1.98) has actually been
-built with.
+`.github/workflows/release.yml` builds all three from one tag push, on real
+Windows, macOS and Linux runners, and attaches the results plus a `.sha256`
+checksum for each to the GitHub release — that is how the *Install* section's
+downloads are produced; nobody hand-builds a release.
+
+Minimum Rust versions, taken from what each crate's dependencies declare:
+`rhizome-proto` 1.75, `rhizome-client` and `rhizome-store` 1.85, `rhizome-app`
+1.88. Only the current stable toolchain (1.98) has actually been built with.
 
 ```bash
 cargo test --workspace
@@ -316,9 +349,13 @@ directory already exists, so it cannot touch real data.
 
 Things that are not done, stated plainly:
 
-- **Windows only, so far.** No Android build (the NDK is not installed and the
-  app crate is not set up as a mobile library), and macOS and Linux are untried.
-- **No auto-updater and no code signing** (see *Install*).
+- **macOS and Linux are built and tested by CI, but not yet used by a person.**
+  Only the Windows build has been driven end to end in its real window. No
+  Apple Silicon build (the macOS job builds Intel only; it runs on an M-series
+  Mac under Rosetta 2).
+- **No Android build.** The NDK is not installed and the app crate is not set
+  up as a mobile library.
+- **No auto-updater and no code signing on any platform** (see *Install*).
 - **No SASL `EXTERNAL`.** The protocol layer models it; the driver does not load
   a client certificate.
 - **No way to accept a self-signed server certificate.** A server whose
