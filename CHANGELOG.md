@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 [Semantic Versioning](https://semver.org/) once 1.0 is reached; until then a
 minor version may change things.
 
+## [0.5.0] — 2026-09-27
+
+### Added
+- **File transfer, over DCC.** `/dcc send nick path` offers a file to
+  someone; an offer they send you shows up as an Accept/Decline card in your
+  conversation with them, with a progress bar while it moves and the saved
+  path once it lands (under this application's own downloads folder, never
+  overwriting a file already there). Active DCC only — your side listens,
+  theirs connects, so it needs your machine reachable on the port it opens,
+  the same requirement every classic DCC client has. "Reverse" (passive) DCC
+  is not implemented; an offer that needs it is shown, but marked as one this
+  client cannot accept, rather than silently failing.
+- `crates/rhizome-proto/src/dcc.rs`: parses and builds the `DCC SEND` CTCP
+  request itself (the filename, the IPv4 address as the classic 32-bit
+  integer, port, size), independent of any socket.
+- `crates/rhizome-client/src/dcc.rs`: the transfer itself — a second, plain
+  TCP connection alongside the chat one, moving the file's bytes with
+  progress reported as it goes.
+- `Handle::ctcp` / `Session::send_ctcp`: a way to send a CTCP request of our
+  own (needed to make a DCC offer) that is never echoed locally as a chat
+  message, the same as how a CTCP *reply* already worked.
+
 ## [0.4.0] — 2026-09-27
 
 ### Added

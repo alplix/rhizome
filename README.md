@@ -222,6 +222,18 @@ and never raise a notification.
   own message under the rate limit.
 - **IRC colours stay readable:** colours chosen for a white or black page are
   nudged until they have enough contrast on the current theme.
+- **Sending and receiving files, over DCC.** `/dcc send nick path` offers a
+  file; an offer someone sends you appears in your conversation with them, as
+  a card with Accept and Decline. An accepted file is saved under this
+  application's own downloads folder, never wherever you last happened to be
+  in a file picker, and never overwrites one already there with the same
+  name. This is the classic *active* DCC — your side listens, theirs
+  connects — so it needs your machine to be reachable on the port it opens,
+  same as it would for any other IRC client; behind a NAT with nothing
+  forwarded, a transfer will simply time out waiting for a connection. The
+  "reverse" (passive) DCC some clients use to work around that is not
+  implemented: an offer that needs it is shown as unsendable rather than
+  silently failing.
 - **One window:** starting Rhizome again focuses the running one, and the window
   reopens where you left it.
 - **Closing the window keeps you connected.** By default the X button (or
